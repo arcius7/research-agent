@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# Model weights (large binary — download via Ollama / VITS2 training)
+*.pth
+
+# TurboVec persisted vector store (rebuilt by ingesting papers)
+.turbovec_store/
+
+# VITS2 dataset & training artefacts
+vits2/LJSpeech-1.1/
+vits2/datasets/*/logs/
+vits2/datasets/*/filelists/*.cleaned
+
+# Audio output
+*.wav
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/

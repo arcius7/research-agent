@@ -1,0 +1,6 @@
+[submodule "vits2"]
+	path = vits2
+	url = https://github.com/daniilrobnikov/vits2.git
+[submodule "turbovec"]
+	path = turbovec
+	url = https://github.com/arcius7/turbovec.git

@@ -1,22 +1,30 @@
-# LangGraph agent
+# ── Agent core ────────────────────────────────────────────────────────────────
 langgraph>=0.2.0
 requests>=2.31.0
 
-# Vector store  (Rust extension — pre-built wheel on PyPI)
+# ── Vector store (turbovec submodule — Rust ext, pre-built wheel) ─────────────
 turbovec[langchain]
 
-# Document loaders
+# ── Document loaders ──────────────────────────────────────────────────────────
 pypdf>=4.0.0
 python-docx>=1.1.0
 openpyxl>=3.1.0
 
-# TTS / VITS2
+# ── Page index (PageIndex submodule) ──────────────────────────────────────────
+litellm>=1.40.0        # routes PageIndex's LLM calls to local Ollama
+PyYAML>=6.0
+
+# ── TTS (vits2 submodule) ─────────────────────────────────────────────────────
 torch>=2.0.0
 torchaudio>=2.0.0
 torchtext>=0.15.0
 soundfile>=0.12.0
 phonemizer>=3.2.0
-PyYAML>=6.0
 
-# Numeric / ML
+# ── Numeric ───────────────────────────────────────────────────────────────────
 numpy>=1.24.0
+
+# External services (not pip):
+#   Ollama       — ollama pull gemma4:e4b ; ollama pull nomic-embed-text
+#   SearXNG      — docker compose up -d           (reference search)
+#   agentmemory  — npx @agentmemory/agentmemory   (research memory, optional)

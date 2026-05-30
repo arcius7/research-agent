@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Research Agent</title>
+<style>
+  :root {
+    --bg:#0e1117; --panel:#161b22; --panel2:#1c2230; --border:#2a3242;
+    --text:#e6edf3; --muted:#8b949e; --accent:#ff6347; --accent2:#58a6ff;
+    --good:#3fb950; --radius:10px;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    background:var(--bg); color:var(--text); height:100vh; overflow:hidden;
+  }
+  /* Header */
+  header {
+    display:flex; align-items:center; gap:20px; padding:10px 18px;
+    background:var(--panel); border-bottom:1px solid var(--border);
+  }
+  .brand { font-weight:700; font-size:16px; letter-spacing:.3px; }
+  .brand span { color:var(--accent); }
+  .paper-name { color:var(--muted); font-size:13px; margin-left:6px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:320px; }
+  .timer { margin-left:auto; display:flex; align-items:center; gap:12px; }
+  .clock { font-variant-numeric:tabular-nums; font-size:26px; font-weight:700;
+    min-width:96px; text-align:center; }
+  .mode-pill { font-size:11px; text-transform:uppercase; letter-spacing:.6px;
+    padding:3px 9px; border-radius:99px; background:var(--panel2); color:var(--muted); }
+  .mode-work  { color:var(--accent);  box-shadow:inset 0 0 0 1px var(--accent); }
+  .mode-break { color:var(--good);    box-shadow:inset 0 0 0 1px var(--good); }
+  button {
+    background:var(--panel2); color:var(--text); border:1px solid var(--border);
+    border-radius:8px; padding:7px 12px; font-size:13px; cursor:pointer;
+    transition:.15s; font-weight:500;
+  }
+  button:hover { border-color:var(--accent2); color:#fff; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.primary:hover { filter:brightness(1.1); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  /* Layout */
+  main { display:flex; height:calc(100vh - 57px); }
+  .left { width:58%; border-right:1px solid var(--border); position:relative;
+    display:flex; flex-direction:column; }
+  .right { width:42%; display:flex; flex-direction:column; }
+  /* PDF viewer / dropzone */
+  #viewer { flex:1; border:0; background:#525659; }
+  .dropzone {
+    flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:14px; text-align:center; padding:40px; color:var(--muted);
+    border:2px dashed var(--border); margin:24px; border-radius:var(--radius);
+    transition:.2s;
+  }
+  .dropzone.drag { border-color:var(--accent); color:var(--text); background:var(--panel); }
+  .dropzone h2 { margin:0; color:var(--text); font-weight:600; }
+  .upload-icon { font-size:46px; }
+  /* Tabs */
+  .tabs { display:flex; gap:2px; padding:8px 8px 0; background:var(--panel);
+    border-bottom:1px solid var(--border); }
+  .tab { padding:9px 14px; font-size:13px; color:var(--muted); cursor:pointer;
+    border-radius:8px 8px 0 0; user-select:none; }
+  .tab.active { color:var(--text); background:var(--panel2); }
+  .tab-body { flex:1; overflow-y:auto; padding:16px; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  /* Generic bits */
+  .row { display:flex; gap:8px; margin-bottom:12px; }
+  .row input, .row textarea {
+    flex:1; background:var(--bg); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; padding:9px 11px; font-size:13px; font-family:inherit; resize:vertical;
+  }
+  .row input:focus, .row textarea:focus { outline:none; border-color:var(--accent2); }
+  .hint { color:var(--muted); font-size:12px; margin:4px 0 14px; }
+  .spinner { display:inline-block; width:15px; height:15px; border:2px solid var(--border);
+    border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite;
+    vertical-align:-3px; margin-right:7px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  /* Profile card */
+  .profile { background:var(--panel2); border:1px solid var(--border); border-radius:var(--radius);
+    padding:14px; margin-bottom:14px; display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .profile .stat { font-size:12px; color:var(--muted); }
+  .profile .stat b { display:block; font-size:17px; color:var(--text); font-weight:700; margin-top:2px; }
+  /* Tree */
+  .tree ul { list-style:none; margin:0; padding-left:16px; }
+  .tree > ul { padding-left:0; }
+  .tree li { margin:3px 0; }
+  .node { cursor:pointer; padding:4px 7px; border-radius:6px; font-size:13px;
+    display:flex; justify-content:space-between; gap:8px; }
+  .node:hover { background:var(--panel2); }
+  .node .pp { color:var(--muted); font-size:11px; white-space:nowrap; }
+  .node .summary { color:var(--muted); font-size:11px; margin:2px 0 0 7px; display:none; }
+  /* Reference / result items */
+  .item { background:var(--panel2); border:1px solid var(--border); border-radius:9px;
+    padding:11px 12px; margin-bottom:9px; }
+  .item .title { font-size:13px; font-weight:600; line-height:1.35; }
+  .item .meta { color:var(--muted); font-size:11.5px; margin-top:3px; }
+  .item .acts { margin-top:8px; display:flex; gap:6px; align-items:center; }
+  .badge { font-size:11px; padding:2px 7px; border-radius:99px; }
+  .badge.ok  { background:rgba(63,185,80,.15); color:var(--good); }
+  .badge.no  { background:rgba(248,81,73,.15);  color:#f85149; }
+  .answer { background:var(--panel2); border:1px solid var(--border); border-left:3px solid var(--accent);
+    border-radius:9px; padding:14px; font-size:14px; line-height:1.6; white-space:pre-wrap; }
+  a { color:var(--accent2); text-decoration:none; } a:hover { text-decoration:underline; }
+  .empty { color:var(--muted); font-size:13px; text-align:center; padding:30px 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">🔬 Research<span>Agent</span></div>
+  <div class="paper-name" id="paperName">no paper loaded</div>
+  <div class="timer">
+    <div class="mode-pill" id="modePill">work</div>
+    <div class="clock" id="clock">25:00</div>
+    <button id="btnStart" onclick="timer('start')">▶</button>
+    <button onclick="timer('pause')">❚❚</button>
+    <button onclick="timer('skip')">⤼</button>
+  </div>
+</header>
+
+<main>
+  <!-- LEFT: PDF viewer / upload -->
+  <div class="left">
+    <div class="dropzone" id="dropzone">
+      <div class="upload-icon">📄</div>
+      <h2>Drop a paper here</h2>
+      <div>or <button class="primary" onclick="document.getElementById('file').click()">choose a PDF</button></div>
+      <div class="hint">It will be embedded, page-indexed, and its references made searchable.</div>
+      <input type="file" id="file" accept="application/pdf" style="display:none" />
+    </div>
+    <iframe id="viewer" style="display:none"></iframe>
+  </div>
+
+  <!-- RIGHT: panels -->
+  <div class="right">
+    <div class="tabs">
+      <div class="tab active" data-tab="index"   onclick="tab('index')">Page Index</div>
+      <div class="tab"        data-tab="refs"    onclick="tab('refs')">References</div>
+      <div class="tab"        data-tab="ask"     onclick="tab('ask')">Ask</div>
+      <div class="tab"        data-tab="find"    onclick="tab('find')">Find Papers</div>
+    </div>
+    <div class="tab-body">
+
+      <!-- PAGE INDEX -->
+      <div class="panel active" id="panel-index">
+        <div id="profile"></div>
+        <div class="row">
+          <button class="primary" id="btnTree" onclick="loadTree()" disabled>Build page index</button>
+        </div>
+        <div class="hint">A reasoning-based tree of the paper (PageIndex). Click a section to jump there.</div>
+        <div class="tree" id="tree"></div>
+      </div>
+
+      <!-- REFERENCES -->
+      <div class="panel" id="panel-refs">
+        <div class="row">
+          <button class="primary" id="btnRefs" onclick="loadRefs()" disabled>Extract references</button>
+        </div>
+        <div class="row">
+          <input id="refQuery" placeholder="download references about… e.g. attention, diffusion" />
+          <button onclick="searchRefs()">Search &amp; download</button>
+        </div>
+        <div class="hint">References are pulled by Gemma, then found &amp; downloaded via SearXNG into <code>downloaded_refs/</code>.</div>
+        <div id="refs"></div>
+      </div>
+
+      <!-- ASK -->
+      <div class="panel" id="panel-ask">
+        <div class="row">
+          <textarea id="question" rows="3" placeholder="Ask anything about the ingested papers…"></textarea>
+        </div>
+        <div class="row">
+          <button class="primary" onclick="ask()">Ask Gemma</button>
+        </div>
+        <div class="hint">Retrieval over your TurboVec embeddings → answered locally by gemma4:e4b.</div>
+        <div id="answer"></div>
+      </div>
+
+      <!-- FIND PAPERS -->
+      <div class="panel" id="panel-find">
+        <div class="row">
+          <input id="webQuery" placeholder="search the web for new papers…" />
+          <button class="primary" onclick="webSearch()">Search</button>
+        </div>
+        <div class="hint">Powered by your self-hosted SearXNG engine.</div>
+        <div id="web"></div>
+      </div>
+
+    </div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentPaper = null;
+
+// ── Timer ────────────────────────────────────────────────────────────────────
+async function timer(action){ await fetch('/api/'+action,{method:'POST'}); refresh(); }
+function fmt(s){ const m=Math.floor(s/60), x=s%60; return String(m).padStart(2,'0')+':'+String(x).padStart(2,'0'); }
+async function refresh(){
+  try{
+    const s = await (await fetch('/api/state')).json();
+    const dur = s.settings[ s.mode==='work'?'work_duration': s.mode==='short_break'?'short_break':'long_break' ];
+    $('clock').textContent = fmt(Math.max(0, dur - s.elapsed));
+    $('modePill').textContent = s.mode.replace('_',' ');
+    $('modePill').className = 'mode-pill ' + (s.mode==='work'?'mode-work':'mode-break');
+    $('btnStart').textContent = s.running ? '❚❚' : '▶';
+    $('btnStart').onclick = () => timer(s.running?'pause':'start');
+    if(s.current_paper && s.current_paper!==currentPaper) setPaper(s.current_paper);
+  }catch(e){}
+}
+setInterval(refresh, 1000); refresh();
+
+// ── Upload ───────────────────────────────────────────────────────────────────
+const dz = $('dropzone');
+['dragover','dragenter'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag');}));
+['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag');}));
+dz.addEventListener('drop', e=>{ if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); });
+$('file').addEventListener('change', e=>{ if(e.target.files[0]) upload(e.target.files[0]); });
+
+async function upload(file){
+  if(!file.name.toLowerCase().endsWith('.pdf')) return alert('Please choose a PDF.');
+  dz.querySelector('h2').textContent = 'Uploading '+file.name+'…';
+  const res = await fetch('/api/upload',{method:'POST', headers:{'X-Filename':file.name}, body:file});
+  const j = await res.json();
+  setPaper(j.name);
+  ingest(j.name);
+}
+
+function setPaper(name){
+  currentPaper = name;
+  $('paperName').textContent = name;
+  $('viewer').src = '/api/pdf?name='+encodeURIComponent(name);
+  $('viewer').style.display='block';
+  dz.style.display='none';
+  ['btnTree','btnRefs'].forEach(id=>$(id).disabled=false);
+}
+
+// ── Ingest (embeddings + adaptive profile) ───────────────────────────────────
+async function ingest(name){
+  $('profile').innerHTML = '<div class="hint"><span class="spinner"></span>Embedding paper & deriving session profile…</div>';
+  tab('index');
+  try{
+    const j = await (await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},
+                     body:JSON.stringify({name})})).json();
+    if(j.error) throw new Error(j.error);
+    const p = j.profile||{};
+    $('profile').innerHTML = `<div class="profile">
+      <div class="stat">Pages<b>${p.n_pages??'–'}</b></div>
+      <div class="stat">Work session<b>${p.work_minutes??'–'} min</b></div>
+      <div class="stat">Chunk size<b>${p.chunk_size??'–'}</b></div>
+      <div class="stat">Voice<b>#${p.speaker_id??'–'}</b></div>
+    </div>`;
+    refresh();
+  }catch(e){ $('profile').innerHTML = `<div class="item"><span class="badge no">ingest failed</span><div class="meta">${e.message}</div></div>`; }
+}
+
+// ── Page index tree ──────────────────────────────────────────────────────────
+async function loadTree(){
+  if(!currentPaper) return;
+  $('tree').innerHTML = '<div class="hint"><span class="spinner"></span>Building reasoning tree (this calls Gemma per section)…</div>';
+  try{
+    const j = await (await fetch('/api/tree?name='+encodeURIComponent(currentPaper))).json();
+    if(j.error) throw new Error(j.error);
+    $('tree').innerHTML = '<ul>'+renderNodes(j.tree)+'</ul>';
+  }catch(e){ $('tree').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+}
+function renderNodes(nodes){
+  if(!nodes) return '';
+  if(!Array.isArray(nodes)) nodes = nodes.nodes || [nodes];
+  return nodes.map(n=>{
+    const pp = (n.start_index!=null) ? `<span class="pp">p.${n.start_index}</span>` : '';
+    const jump = n.start_index!=null ? `onclick="jump(${n.start_index})"` : '';
+    const kids = n.nodes ? '<ul>'+renderNodes(n.nodes)+'</ul>' : '';
+    const sum  = n.summary ? `<div class="summary">${n.summary}</div>` : '';
+    return `<li><div class="node" ${jump}><span>${n.title||'Untitled'}</span>${pp}</div>${sum}${kids}</li>`;
+  }).join('');
+}
+function jump(page){ if(currentPaper) $('viewer').src = '/api/pdf?name='+encodeURIComponent(currentPaper)+'#page='+page; }
+
+// ── References ───────────────────────────────────────────────────────────────
+async function loadRefs(){
+  if(!currentPaper) return;
+  $('refs').innerHTML = '<div class="hint"><span class="spinner"></span>Extracting references with Gemma…</div>';
+  try{
+    const j = await (await fetch('/api/references?name='+encodeURIComponent(currentPaper))).json();
+    if(j.error) throw new Error(j.error);
+    if(!j.references.length){ $('refs').innerHTML='<div class="empty">No references found.</div>'; return; }
+    $('refs').innerHTML = `<div class="hint">${j.count} references found</div>` + j.references.map(r=>`
+      <div class="item"><div class="title">${r.title}</div>
+        <div class="meta">${[r.authors,r.year].filter(Boolean).join(' · ')}</div></div>`).join('');
+  }catch(e){ $('refs').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+}
+async function searchRefs(){
+  if(!currentPaper) return;
+  const query = $('refQuery').value.trim(); if(!query) return;
+  $('refs').innerHTML = '<div class="hint"><span class="spinner"></span>Searching &amp; downloading via SearXNG…</div>';
+  try{
+    const j = await (await fetch('/api/references/search',{method:'POST',headers:{'Content-Type':'application/json'},
+                     body:JSON.stringify({name:currentPaper, query})})).json();
+    if(j.error) throw new Error(j.error);
+    if(!j.downloaded.length){ $('refs').innerHTML='<div class="empty">No matching references to download.</div>'; return; }
+    $('refs').innerHTML = j.downloaded.map(d=>`
+      <div class="item"><div class="title">${d.title}</div>
+        <div class="acts">${ d.path ? '<span class="badge ok">downloaded</span>'
+          : d.found ? '<span class="badge no">no PDF</span>' : '<span class="badge no">not found</span>' }
+          ${ d.page_url ? `<a href="${d.page_url}" target="_blank">source ↗</a>`:'' }</div>
+        ${ d.error?`<div class="meta">${d.error}</div>`:'' }
+        ${ d.path?`<div class="meta">→ ${d.path}</div>`:'' }</div>`).join('');
+  }catch(e){ $('refs').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+}
+
+// ── Ask (RAG) ────────────────────────────────────────────────────────────────
+async function ask(){
+  const q = $('question').value.trim(); if(!q) return;
+  $('answer').innerHTML = '<div class="hint"><span class="spinner"></span>Retrieving & answering with gemma4:e4b…</div>';
+  try{
+    const j = await (await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},
+                     body:JSON.stringify({question:q})})).json();
+    if(j.error) throw new Error(j.error);
+    $('answer').innerHTML = `<div class="answer">${j.answer}</div>`;
+  }catch(e){ $('answer').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+}
+
+// ── Find papers (web) ────────────────────────────────────────────────────────
+async function webSearch(){
+  const q = $('webQuery').value.trim(); if(!q) return;
+  $('web').innerHTML = '<div class="hint"><span class="spinner"></span>Searching SearXNG…</div>';
+  try{
+    const j = await (await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},
+                     body:JSON.stringify({query:q})})).json();
+    if(j.error) throw new Error(j.error);
+    if(!j.results.length){ $('web').innerHTML='<div class="empty">No results.</div>'; return; }
+    $('web').innerHTML = j.results.map(r=>`
+      <div class="item"><div class="title"><a href="${r.url}" target="_blank">${r.title}</a></div>
+        <div class="meta">${(r.content||'').slice(0,160)}</div></div>`).join('');
+  }catch(e){ $('web').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+}
+
+// ── Tabs ─────────────────────────────────────────────────────────────────────
+function tab(name){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
+  document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active', p.id==='panel-'+name));
+}
+
+// Load most recent paper on open
+(async()=>{ try{ const j=await (await fetch('/api/papers')).json();
+  if(j.papers && j.papers.length) setPaper(j.papers[j.papers.length-1]); }catch(e){} })();
+</script>
+</body>
+</html>

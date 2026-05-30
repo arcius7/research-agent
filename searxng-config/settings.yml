@@ -1,0 +1,30 @@
+# SearXNG settings for the research agent.
+# The key line is `search.formats` — the JSON API the agent uses is OFF by
+# default and must be enabled here.
+
+use_default_settings: true
+
+server:
+  # Change this secret before exposing the instance to anything but localhost.
+  secret_key: "research-agent-change-me"
+  limiter: false
+  image_proxy: true
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json          # ← enables GET /search?format=json (used by searxng_client.py)
+
+engines:
+  - name: arxiv
+    disabled: false
+  - name: google scholar
+    disabled: false
+  - name: semantic scholar
+    disabled: false
+  - name: pubmed
+    disabled: false
+  - name: crossref
+    disabled: false

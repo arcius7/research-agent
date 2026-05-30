@@ -1,0 +1,38 @@
+# Self-hosted SearXNG for the research agent's reference search.
+# JSON output is enabled via ./searxng-config/settings.yml (required by the API).
+#
+#   docker compose up -d        # start the engine on http://localhost:8080
+#   docker compose down         # stop it
+#
+# The agent talks to it over the JSON API (searxng_client.py).
+
+name: research-agent-search
+
+services:
+  searxng:
+    container_name: research-searxng
+    image: docker.io/searxng/searxng:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng-config:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+
+  valkey:
+    container_name: research-valkey
+    image: docker.io/valkey/valkey:8-alpine
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    volumes:
+      - valkey-data:/data
+
+volumes:
+  valkey-data:

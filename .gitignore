@@ -20,6 +20,15 @@ env/
 # TurboVec persisted vector store (rebuilt by ingesting papers)
 .turbovec_store/
 
+# Runtime artefacts
+uploads/                 # papers uploaded via the frontend
+downloaded_refs/         # references fetched by SearXNG
+.pageindex_trees/        # cached PageIndex trees
+
+# SearXNG generated files (settings.yml is tracked; the rest is runtime)
+searxng-config/*
+!searxng-config/settings.yml
+
 # VITS2 dataset & training artefacts
 vits2/LJSpeech-1.1/
 vits2/datasets/*/logs/

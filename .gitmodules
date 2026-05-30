@@ -4,3 +4,12 @@
 [submodule "turbovec"]
 	path = turbovec
 	url = https://github.com/arcius7/turbovec.git
+[submodule "PageIndex"]
+	path = PageIndex
+	url = https://github.com/arcius7/PageIndex.git
+[submodule "agentmemory"]
+	path = agentmemory
+	url = https://github.com/arcius7/agentmemory.git
+[submodule "searxng"]
+	path = searxng
+	url = https://github.com/searxng/searxng.git

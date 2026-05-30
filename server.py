@@ -1,24 +1,41 @@
 #!/usr/bin/env python3
 """
-Pomodoro Timer Backend — REST API + static file server.
-State is importable by agent.py so LangGraph nodes share it directly.
+Research Agent Backend — REST API + static frontend server.
+
+Serves index.html (the upload / viewer / page-index / references UI) and exposes:
+
+  Timer      /api/state /api/start /api/pause /api/reset /api/skip /api/settings ...
+  Papers     POST /api/upload   GET /api/papers   GET /api/pdf?name=
+  RAG        POST /api/ingest   POST /api/query
+  PageIndex  GET  /api/tree?name=
+  References GET  /api/references?name=   POST /api/references/search
+  Web search POST /api/search
+
+Heavy modules (agent.py → torch/vits, pageindex, references) are imported lazily
+inside each handler so the server boots instantly and a missing optional
+dependency only breaks the one endpoint that needs it.
 """
 
 import json
+import os
 import time
 import threading
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse
-import os
+import traceback
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+
+_HERE       = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR  = os.path.join(_HERE, "uploads")
 
 # ── Timer state ───────────────────────────────────────────────────────────────
 
 state: dict = {
-    "mode": "work",           # "work" | "short_break" | "long_break"
+    "mode": "work",
     "running": False,
-    "elapsed": 0,             # seconds into current session
-    "session_count": 0,       # completed pomodoros
+    "elapsed": 0,
+    "session_count": 0,
     "tasks": [],
+    "current_paper": None,
     "settings": {
         "work_duration":       25 * 60,
         "short_break":          5 * 60,
@@ -52,25 +69,24 @@ def _advance_mode() -> None:
 
 
 def _tick() -> None:
-    """Background thread: advances elapsed and auto-transitions on completion."""
     while True:
         time.sleep(1)
         with state_lock:
             if not state["running"]:
                 continue
             state["elapsed"] += 1
-            duration = state["settings"][_MODE_KEY[state["mode"]]]
-            if state["elapsed"] >= duration:
+            if state["elapsed"] >= state["settings"][_MODE_KEY[state["mode"]]]:
                 _advance_mode()
 
 
 # ── HTTP handler ──────────────────────────────────────────────────────────────
 
-class PomodoroHandler(SimpleHTTPRequestHandler):
+class Handler(SimpleHTTPRequestHandler):
     def log_message(self, *_):
         pass
 
-    def send_json(self, data: dict, status: int = 200) -> None:
+    # — helpers —
+    def _json(self, data, status=200):
         body = json.dumps(data).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -79,129 +95,220 @@ class PomodoroHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _body(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {}
+
+    def _raw_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length", 0))
+        return self.rfile.read(length) if length else b""
+
+    def _fail(self, exc: Exception):
+        self._json({"error": str(exc), "trace": traceback.format_exc()}, 500)
+
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Filename")
         self.end_headers()
 
+    # — GET —
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path   = parsed.path
+        qs     = parse_qs(parsed.query)
 
         if path == "/api/state":
             with state_lock:
-                self.send_json(state)
+                self._json(state)
+
+        elif path == "/api/papers":
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            papers = sorted(f for f in os.listdir(UPLOAD_DIR) if f.lower().endswith(".pdf"))
+            self._json({"papers": papers})
+
+        elif path == "/api/pdf":
+            self._serve_pdf(qs.get("name", [""])[0])
+
+        elif path == "/api/tree":
+            self._tree(qs.get("name", [""])[0])
+
+        elif path == "/api/references":
+            self._references(qs.get("name", [""])[0])
 
         elif path in ("/", "/index.html"):
-            try:
-                with open("index.html", "rb") as f:
-                    content = f.read()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.send_header("Content-Length", str(len(content)))
-                self.end_headers()
-                self.wfile.write(content)
-            except FileNotFoundError:
-                self.send_response(404)
-                self.end_headers()
+            self._serve_file(os.path.join(_HERE, "index.html"), "text/html")
 
         else:
-            super().do_GET()
+            self.send_response(404)
+            self.end_headers()
 
+    # — POST —
     def do_POST(self):
         path = urlparse(self.path).path
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length) if length else b"{}"
         try:
-            data = json.loads(raw)
+            match path:
+                case "/api/start":
+                    with state_lock: state["running"] = True
+                    self._json({"ok": True})
+                case "/api/pause":
+                    with state_lock: state["running"] = False
+                    self._json({"ok": True})
+                case "/api/reset":
+                    with state_lock:
+                        state["running"] = False; state["elapsed"] = 0
+                    self._json({"ok": True})
+                case "/api/skip":
+                    with state_lock: _advance_mode()
+                    self._json({"ok": True})
+                case "/api/settings":
+                    self._settings(self._body())
+                case "/api/upload":
+                    self._upload()
+                case "/api/ingest":
+                    self._ingest(self._body())
+                case "/api/query":
+                    self._query(self._body())
+                case "/api/references/search":
+                    self._ref_search(self._body())
+                case "/api/search":
+                    self._web_search(self._body())
+                case _:
+                    self._json({"error": "Not found"}, 404)
+        except Exception as e:               # noqa: BLE001 — surface to the UI
+            self._fail(e)
+
+    # ── endpoint impls ────────────────────────────────────────────────────────
+
+    def _serve_file(self, path, ctype):
+        try:
+            with open(path, "rb") as f:
+                content = f.read()
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        except FileNotFoundError:
+            self.send_response(404)
+            self.end_headers()
+
+    def _serve_pdf(self, name):
+        safe = os.path.basename(name or "")
+        path = os.path.join(UPLOAD_DIR, safe)
+        if safe and os.path.exists(path):
+            self._serve_file(path, "application/pdf")
+        else:
+            self.send_response(404); self.end_headers()
+
+    def _settings(self, data):
+        with state_lock:
+            for key in ("work_duration", "short_break", "long_break", "long_break_interval"):
+                if key in data:
+                    state["settings"][key] = int(data[key])
+            state["elapsed"] = 0
+            state["running"] = False
+        self._json({"ok": True})
+
+    def _upload(self):
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        name = os.path.basename(self.headers.get("X-Filename", "") or f"paper_{int(time.time())}.pdf")
+        if not name.lower().endswith(".pdf"):
+            name += ".pdf"
+        data = self._raw_body()
+        with open(os.path.join(UPLOAD_DIR, name), "wb") as f:
+            f.write(data)
+        with state_lock:
+            state["current_paper"] = name
+        self._json({"ok": True, "name": name, "bytes": len(data)})
+
+    def _ingest(self, data):
+        name = os.path.basename(data.get("name", ""))
+        path = os.path.join(UPLOAD_DIR, name)
+        if not os.path.exists(path):
+            return self._json({"error": f"unknown paper: {name}"}, 404)
+
+        import agent
+        result  = agent.ingest([path])
+        profile = result["results"][0].get("profile") or {}
+
+        try:
+            import memory_client
+            memory_client.log_ingest(name, profile)
         except Exception:
-            data = {}
+            pass
 
-        match path:
-            case "/api/start":
-                with state_lock:
-                    state["running"] = True
-                self.send_json({"ok": True})
+        with state_lock:
+            state["current_paper"] = name
+            snapshot = {**state}
+        self._json({"ok": True, "profile": profile, "timer": snapshot,
+                    "ingested": result["results"][0]["ingested"]})
 
-            case "/api/pause":
-                with state_lock:
-                    state["running"] = False
-                self.send_json({"ok": True})
+    def _query(self, data):
+        question = data.get("question", "").strip()
+        if not question:
+            return self._json({"error": "empty question"}, 400)
+        import agent
+        answer = agent.query(question)
+        try:
+            import memory_client
+            memory_client.log_query(question, answer)
+        except Exception:
+            pass
+        self._json({"answer": answer})
 
-            case "/api/reset":
-                with state_lock:
-                    state["running"] = False
-                    state["elapsed"] = 0
-                self.send_json({"ok": True})
+    def _tree(self, name):
+        name = os.path.basename(name or "")
+        path = os.path.join(UPLOAD_DIR, name)
+        if not os.path.exists(path):
+            return self._json({"error": f"unknown paper: {name}"}, 404)
+        import pageindex_tree
+        payload = pageindex_tree.build_tree(path)
+        self._json(payload)
 
-            case "/api/skip":
-                with state_lock:
-                    _advance_mode()
-                self.send_json({"ok": True})
+    def _references(self, name):
+        name = os.path.basename(name or "")
+        path = os.path.join(UPLOAD_DIR, name)
+        if not os.path.exists(path):
+            return self._json({"error": f"unknown paper: {name}"}, 404)
+        import references
+        refs = references.extract_references(path)
+        self._json({"paper": name, "count": len(refs), "references": refs})
 
-            case "/api/set_mode":
-                mode = data.get("mode", "work")
-                if mode in _MODE_KEY:
-                    with state_lock:
-                        state["mode"] = mode
-                        state["elapsed"] = 0
-                        state["running"] = False
-                self.send_json({"ok": True})
+    def _ref_search(self, data):
+        name  = os.path.basename(data.get("name", ""))
+        query = data.get("query", "").strip()
+        path  = os.path.join(UPLOAD_DIR, name)
+        if not os.path.exists(path):
+            return self._json({"error": f"unknown paper: {name}"}, 404)
+        import references
+        refs    = references.extract_references(path)
+        results = references.download_matching(refs, query, source_paper=name)
+        self._json({"query": query, "downloaded": results})
 
-            case "/api/settings":
-                with state_lock:
-                    for key in ("work_duration", "short_break", "long_break", "long_break_interval"):
-                        if key in data:
-                            state["settings"][key] = int(data[key])
-                    state["elapsed"] = 0
-                    state["running"] = False
-                self.send_json({"ok": True})
-
-            case "/api/tasks/add":
-                task = data.get("task", "").strip()
-                if task:
-                    with state_lock:
-                        state["tasks"].append({
-                            "id": int(time.time() * 1000),
-                            "text": task,
-                            "done": False,
-                        })
-                self.send_json({"ok": True})
-
-            case "/api/tasks/toggle":
-                task_id = data.get("id")
-                with state_lock:
-                    for t in state["tasks"]:
-                        if t["id"] == task_id:
-                            t["done"] = not t["done"]
-                            break
-                self.send_json({"ok": True})
-
-            case "/api/tasks/delete":
-                task_id = data.get("id")
-                with state_lock:
-                    state["tasks"] = [t for t in state["tasks"] if t["id"] != task_id]
-                self.send_json({"ok": True})
-
-            case "/api/reset_sessions":
-                with state_lock:
-                    state.update(mode="work", elapsed=0, running=False, session_count=0)
-                self.send_json({"ok": True})
-
-            case _:
-                self.send_json({"error": "Not found"}, 404)
+    def _web_search(self, data):
+        query = data.get("query", "").strip()
+        if not query:
+            return self._json({"error": "empty query"}, 400)
+        import searxng_client
+        results = searxng_client.search(query, max_results=int(data.get("k", 10)))
+        self._json({"query": query, "results": results})
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
     threading.Thread(target=_tick, daemon=True).start()
 
-    port = 8765
-    server = HTTPServer(("0.0.0.0", port), PomodoroHandler)
-    print(f"Pomodoro Timer running at http://localhost:{port}")
+    port   = int(os.environ.get("PORT", 8765))
+    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    print(f"Research Agent running at http://localhost:{port}")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()

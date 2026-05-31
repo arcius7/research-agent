@@ -20,10 +20,10 @@ env/
 # TurboVec persisted vector store (rebuilt by ingesting papers)
 .turbovec_store/
 
-# Runtime artefacts
-uploads/                 # papers uploaded via the frontend
-downloaded_refs/         # references fetched by SearXNG
-.pageindex_trees/        # cached PageIndex trees
+# Runtime artefacts (git does NOT allow inline comments — keep these bare)
+uploads/
+downloaded_refs/
+.pageindex_trees/
 
 # SearXNG generated files (settings.yml is tracked; the rest is runtime)
 searxng-config/*

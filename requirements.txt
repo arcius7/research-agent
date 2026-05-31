@@ -1,30 +1,21 @@
-# ── Agent core ────────────────────────────────────────────────────────────────
+# ── CORE — installs fast, makes the app fully usable ─────────────────────────
+# Upload · embed · ask (RAG) · references (SearXNG) · web search · browser voice
+#
+#   pip install -r requirements.txt
+#
 langgraph>=0.2.0
 requests>=2.31.0
-
-# ── Vector store (turbovec submodule — Rust ext, pre-built wheel) ─────────────
 turbovec[langchain]
-
-# ── Document loaders ──────────────────────────────────────────────────────────
 pypdf>=4.0.0
 python-docx>=1.1.0
 openpyxl>=3.1.0
-
-# ── Page index (PageIndex submodule) ──────────────────────────────────────────
-litellm>=1.40.0        # routes PageIndex's LLM calls to local Ollama
-PyYAML>=6.0
-
-# ── TTS (vits2 submodule) ─────────────────────────────────────────────────────
-torch>=2.0.0
-torchaudio>=2.0.0
-torchtext>=0.15.0
-soundfile>=0.12.0
-phonemizer>=3.2.0
-
-# ── Numeric ───────────────────────────────────────────────────────────────────
 numpy>=1.24.0
 
+# ── OPTIONAL add-ons (install only if you want these features) ───────────────
+# Page-index tree (PageIndex):     pip install -r requirements-pageindex.txt
+# VITS neural voice (else browser): pip install -r requirements-vits.txt
+#
 # External services (not pip):
 #   Ollama       — ollama pull gemma4:e4b ; ollama pull nomic-embed-text
-#   SearXNG      — docker compose up -d           (reference search)
-#   agentmemory  — npx @agentmemory/agentmemory   (research memory, optional)
+#   SearXNG      — docker compose up -d
+#   agentmemory  — npx @agentmemory/agentmemory   (optional)

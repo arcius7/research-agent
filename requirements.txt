@@ -1,21 +1,28 @@
-# ── CORE — installs fast, makes the app fully usable ─────────────────────────
-# Upload · embed · ask (RAG) · references (SearXNG) · web search · browser voice
+# ─────────────────────────────────────────────────────────────────────────────
+# Research Agent — single install file.
+# Every version is pinned to a known-good set, so pip installs in one pass
+# with NO resolver backtracking.
 #
 #   pip install -r requirements.txt
-#
-langgraph>=0.2.0
-requests>=2.31.0
-turbovec[langchain]
-pypdf>=4.0.0
-python-docx>=1.1.0
-openpyxl>=3.1.0
-numpy>=1.24.0
+# ─────────────────────────────────────────────────────────────────────────────
 
-# ── OPTIONAL add-ons (install only if you want these features) ───────────────
-# Page-index tree (PageIndex):     pip install -r requirements-pageindex.txt
-# VITS neural voice (else browser): pip install -r requirements-vits.txt
-#
-# External services (not pip):
-#   Ollama       — ollama pull gemma4:e4b ; ollama pull nomic-embed-text
-#   SearXNG      — docker compose up -d
-#   agentmemory  — npx @agentmemory/agentmemory   (optional)
+# Core: agent graph + RAG + document loading
+langgraph==1.2.2
+langchain-core==1.4.0
+turbovec[langchain]==0.7.0
+pypdf==6.12.2
+python-docx==1.2.0
+openpyxl==3.1.5
+numpy==2.4.6
+requests==2.34.2
+
+# Page Index (optional feature, but bundled so the tab just works)
+litellm==1.86.0
+PyPDF2==3.0.1
+pymupdf==1.26.4
+PyYAML==6.0.3
+
+# Neural voice (VITS) is NOT here on purpose — torch is huge and torchtext has
+# no Python 3.12 wheel. Audio uses macOS `say` / the browser voice instead.
+# If you specifically want VITS: see requirements-vits.txt (needs Python 3.11
+# and a trained checkpoint).

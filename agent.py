@@ -622,14 +622,15 @@ def search(question: str) -> list[dict]:
 
 
 _LEARN_Q = (
-    "Summarize the most important concepts, methods, and findings a student should "
-    "learn from this paper. Write 4 to 6 sentences of clear, spoken prose — no bullet "
-    "points or markdown — suitable to be read aloud."
+    "Give a spoken post-mortem of this research paper: the problem it set out to "
+    "solve, the approach and methods used, the key findings and contributions, and "
+    "its main limitations. Write flowing prose of about 6 to 8 sentences — no bullet "
+    "points or markdown — suitable to be read aloud as an audio summary."
 )
 
 
 def learn() -> str:
-    """Key things to learn from the ingested paper(s), as read-aloud-ready prose."""
+    """Spoken post-mortem of the ingested paper, as read-aloud-ready prose."""
     return query(_LEARN_Q)
 
 

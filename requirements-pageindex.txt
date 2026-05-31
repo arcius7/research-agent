@@ -1,8 +1,0 @@
-# OPTIONAL — Page-index tree feature (PageIndex submodule).
-# litellm is pinned to a single version so pip's resolver can't backtrack
-# through hundreds of releases. Install on its own:
-#
-#   pip install -r requirements-pageindex.txt
-#
-litellm==1.86.0
-PyYAML>=6.0

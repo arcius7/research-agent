@@ -374,9 +374,8 @@ function tab(name){
   document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active', p.id==='panel-'+name));
 }
 
-// Load most recent paper on open
-(async()=>{ try{ const j=await (await fetch('/api/papers')).json();
-  if(j.papers && j.papers.length) setPaper(j.papers[j.papers.length-1]); }catch(e){} })();
+// Start clean: always show the upload dropzone. Upload a paper when you want.
+// (We deliberately do NOT auto-open the last paper.)
 </script>
 </body>
 </html>

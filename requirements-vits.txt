@@ -1,15 +1,22 @@
-# OPTIONAL — VITS2 neural voice.
-# Without this, "read aloud" still works via the browser's built-in speech.
-# Install on its own (these are large downloads):
+# ─────────────────────────────────────────────────────────────────────────────
+# OPTIONAL — VITS2 neural voice.  Read before installing.
 #
+# You do NOT need this for spoken audio. The agent generates audio with macOS
+# `say` (real .aiff/.m4a files, selectable voices) and the browser voice.
+#
+# VITS has two hard requirements that make it impractical on this machine:
+#   1. torchtext has no Python 3.12 wheel  → install under Python 3.11.
+#   2. It needs a TRAINED checkpoint (vits2/datasets/<set>/logs/G_*.pth).
+#      Without one it cannot synthesize any audio.
+#
+# Only install if you have both. Otherwise stick with `say` / the browser.
+#
+#   python3.11 -m venv .venv-vits && source .venv-vits/bin/activate
 #   pip install -r requirements-vits.txt
-#
+# ─────────────────────────────────────────────────────────────────────────────
+
 torch>=2.2.0
 torchaudio>=2.2.0
+torchtext==0.18.0
 soundfile>=0.12.0
 phonemizer>=3.2.0
-
-# Note: torchtext is required by VITS for vocab handling but is deprecated and
-# may lack wheels on Python 3.12. If `pip install torchtext` fails, either use
-# Python 3.11 for the voice feature, or stick with the browser fallback.
-torchtext>=0.15.0

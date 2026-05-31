@@ -49,3 +49,6 @@ vits2/datasets/*/filelists/*.cleaned
 # IDE
 .vscode/
 .idea/
+
+# PageIndex run logs / tree outputs
+logs/

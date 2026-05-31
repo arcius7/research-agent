@@ -24,6 +24,7 @@ env/
 uploads/
 downloaded_refs/
 .pageindex_trees/
+audio/
 
 # SearXNG generated files (settings.yml is tracked; the rest is runtime)
 searxng-config/*

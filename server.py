@@ -26,6 +26,7 @@ from urllib.parse import urlparse, parse_qs
 
 _HERE       = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR  = os.path.join(_HERE, "uploads")
+AUDIO_DIR   = os.path.join(_HERE, "audio")
 
 # ── Timer state ───────────────────────────────────────────────────────────────
 
@@ -134,6 +135,9 @@ class Handler(SimpleHTTPRequestHandler):
 
         elif path == "/api/pdf":
             self._serve_pdf(qs.get("name", [""])[0])
+
+        elif path == "/api/audio":
+            self._serve_audio(qs.get("name", [""])[0])
 
         elif path == "/api/tree":
             self._tree(qs.get("name", [""])[0])
@@ -272,22 +276,26 @@ class Handler(SimpleHTTPRequestHandler):
         self._json({"text": text})
 
     def _speak(self, data):
-        """Synthesize text with VITS and return audio/wav. 500 → UI falls back
-        to the browser's speech engine."""
-        text = (data.get("text", "") or "").strip()[:1500]
+        """Generate a spoken audio file with macOS `say`. Returns a JSON url the
+        UI plays + offers as a download. The voice is chosen per paper."""
+        text = (data.get("text", "") or "").strip()[:3000]
         if not text:
             return self._json({"error": "empty text"}, 400)
-        import agent
-        out_path = f"/tmp/speak_{int(time.time())}.wav"
-        agent.synthesize(text, out_path)        # raises if no VITS checkpoint
-        with open(out_path, "rb") as f:
-            content = f.read()
-        self.send_response(200)
-        self.send_header("Content-Type", "audio/wav")
-        self.send_header("Content-Length", str(len(content)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(content)
+        paper = os.path.basename(data.get("paper", "") or "")
+        import tts
+        result = tts.synthesize(text, paper=paper)
+        self._json({
+            "audio_url": f"/api/audio?name={result['filename']}",
+            "voice":     result["voice"],
+        })
+
+    def _serve_audio(self, name):
+        safe = os.path.basename(name or "")
+        path = os.path.join(AUDIO_DIR, safe)
+        if safe and os.path.exists(path):
+            self._serve_file(path, "audio/mp4")
+        else:
+            self.send_response(404); self.end_headers()
 
     def _tree(self, name):
         name = os.path.basename(name or "")

@@ -53,25 +53,20 @@ from typing import Optional, TypedDict
 import requests
 from langgraph.graph import StateGraph, START, END
 
-# ── VITS2 (submodule: vits2/) ─────────────────────────────────────────────────
+# ── VITS2 (submodule: vits2/) — imported LAZILY inside _load_vits() so the agent
+#    runs without torch. Audio normally comes from macOS `say` (tts.py); VITS is
+#    only touched if you explicitly install torch and call synthesize(). ─────────
 
 _HERE     = os.path.dirname(os.path.abspath(__file__))
 VITS_ROOT = os.path.join(_HERE, "vits2")
 if VITS_ROOT not in sys.path:
     sys.path.insert(0, VITS_ROOT)
 
-from model.models import SynthesizerTrn            # noqa: E402
-from text import tokenizer                          # noqa: E402
-from utils.hparams import get_hparams_from_file    # noqa: E402
-from utils.task import load_checkpoint, load_vocab  # noqa: E402
-
 # ── turbovec ──────────────────────────────────────────────────────────────────
 from turbovec.langchain import TurboQuantVectorStore  # noqa: E402
 
 # ── shared pomodoro state ─────────────────────────────────────────────────────
 from server import state as _timer, state_lock, _advance_mode, _MODE_KEY  # noqa: E402
-
-import torch  # noqa: E402
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Static config
@@ -96,11 +91,13 @@ VITS_CHECKPOINT = os.path.join(VITS_ROOT, f"datasets/{VITS_DATASET}/logs/G_1000.
 # VCTK speakers 0-20 are clear, well-trained English voices
 _VCTK_SPEAKERS = list(range(21))
 
-_device = (
-    "mps"  if torch.backends.mps.is_available() else
-    "cuda" if torch.cuda.is_available()          else
-    "cpu"
-)
+def _vits_device():
+    import torch
+    return (
+        "mps"  if torch.backends.mps.is_available() else
+        "cuda" if torch.cuda.is_available()          else
+        "cpu"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -203,6 +200,27 @@ def _ollama_embed(texts: list[str]) -> list[list[float]]:
     return out
 
 
+def set_model(name: str) -> None:
+    """Switch the LLM used for answers at runtime (from the UI dropdown)."""
+    global LLM_MODEL
+    if name:
+        LLM_MODEL = name
+
+
+def get_model() -> str:
+    return LLM_MODEL
+
+
+def list_models() -> list[str]:
+    """Names of models installed in Ollama."""
+    try:
+        r = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=10)
+        r.raise_for_status()
+        return [m["name"] for m in r.json().get("models", [])]
+    except requests.RequestException:
+        return []
+
+
 def _ollama_generate(prompt: str) -> str:
     resp = requests.post(
         f"{OLLAMA_BASE}/api/generate",
@@ -268,14 +286,19 @@ def pomodoro_node(state: AgentState) -> AgentState:
 # Node: vits
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_net_g:      Optional[SynthesizerTrn] = None
+_net_g      = None
 _vits_hps   = None
 _vits_vocab = None
 _model_lock = threading.Lock()
 
 
 def _load_vits() -> None:
+    """Lazy: only imports torch/VITS when VITS audio is actually requested."""
     global _net_g, _vits_hps, _vits_vocab
+    from model.models import SynthesizerTrn
+    from utils.hparams import get_hparams_from_file
+    from utils.task import load_checkpoint, load_vocab
+
     _vits_hps   = get_hparams_from_file(VITS_CONFIG)
     _vits_vocab = load_vocab(VITS_VOCAB)
     filter_len  = (
@@ -287,7 +310,7 @@ def _load_vits() -> None:
     net = SynthesizerTrn(
         len(_vits_vocab), filter_len, seg_size,
         n_speakers=n_speakers, **_vits_hps.model,
-    ).to(_device)
+    ).to(_vits_device())
     net.eval()
     load_checkpoint(VITS_CHECKPOINT, net, None)
     _net_g = net
@@ -307,14 +330,17 @@ def synthesize(text: str, out_path: str,
                noise_scale_w: float = 0.8,
                length_scale: float = 1.0) -> str:
     """text → .wav at out_path via VITS2. speaker_id selects the VCTK voice."""
+    import torch
+    from text import tokenizer
     net, hps, vocab = _get_vits()
+    device = _vits_device()
     tokens = tokenizer(
         text, vocab, hps.data.text_cleaners,
         language=hps.data.language, cleaned_text=False,
     )
-    x     = torch.LongTensor(tokens).unsqueeze(0).to(_device)
-    x_len = torch.LongTensor([len(tokens)]).to(_device)
-    sid   = torch.LongTensor([speaker_id]).to(_device) if speaker_id is not None else None
+    x     = torch.LongTensor(tokens).unsqueeze(0).to(device)
+    x_len = torch.LongTensor([len(tokens)]).to(device)
+    sid   = torch.LongTensor([speaker_id]).to(device) if speaker_id is not None else None
     with torch.no_grad():
         out = net.infer(x, x_len, sid=sid,
                         noise_scale=noise_scale,
@@ -478,15 +504,8 @@ def ingest_node(state: AgentState) -> AgentState:
 
     store.dump(TURBOVEC_DIR)
 
-    # ── announce the profile via VITS ─────────────────────────────────────────
-    announce = None
-    if profile and ingested:
-        announce = (
-            f"Paper loaded. {profile['work_minutes']} minute work sessions. "
-            f"Voice {profile['speaker_id']} selected. "
-            f"{len(ingested)} document{'s' if len(ingested) > 1 else ''} ready."
-        )
-
+    # Audio is generated on demand via macOS `say` (/api/speak), so ingest does
+    # NOT route through VITS — keeps ingest fast and torch-free.
     with state_lock:
         snapshot = {**_timer, "tasks": list(_timer["tasks"])}
 
@@ -495,7 +514,7 @@ def ingest_node(state: AgentState) -> AgentState:
         "timer":         snapshot,
         "paper_profile": profile,
         "speaker_id":    profile["speaker_id"] if profile else state.get("speaker_id"),
-        "announce":      announce,
+        "announce":      None,
         "results":       [{"ingested": ingested,
                            "total_docs": len(store),
                            "profile": profile}],

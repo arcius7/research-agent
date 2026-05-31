@@ -124,33 +124,40 @@ class Handler(SimpleHTTPRequestHandler):
         path   = parsed.path
         qs     = parse_qs(parsed.query)
 
-        if path == "/api/state":
-            with state_lock:
-                self._json(state)
+        try:
+            if path == "/api/state":
+                with state_lock:
+                    self._json(state)
 
-        elif path == "/api/papers":
-            os.makedirs(UPLOAD_DIR, exist_ok=True)
-            papers = sorted(f for f in os.listdir(UPLOAD_DIR) if f.lower().endswith(".pdf"))
-            self._json({"papers": papers})
+            elif path == "/api/papers":
+                os.makedirs(UPLOAD_DIR, exist_ok=True)
+                papers = sorted(f for f in os.listdir(UPLOAD_DIR) if f.lower().endswith(".pdf"))
+                self._json({"papers": papers})
 
-        elif path == "/api/pdf":
-            self._serve_pdf(qs.get("name", [""])[0])
+            elif path == "/api/models":
+                import agent
+                self._json({"models": agent.list_models(), "current": agent.get_model()})
 
-        elif path == "/api/audio":
-            self._serve_audio(qs.get("name", [""])[0])
+            elif path == "/api/pdf":
+                self._serve_pdf(qs.get("name", [""])[0])
 
-        elif path == "/api/tree":
-            self._tree(qs.get("name", [""])[0])
+            elif path == "/api/audio":
+                self._serve_audio(qs.get("name", [""])[0])
 
-        elif path == "/api/references":
-            self._references(qs.get("name", [""])[0])
+            elif path == "/api/tree":
+                self._tree(qs.get("name", [""])[0])
 
-        elif path in ("/", "/index.html"):
-            self._serve_file(os.path.join(_HERE, "index.html"), "text/html")
+            elif path == "/api/references":
+                self._references(qs.get("name", [""])[0])
 
-        else:
-            self.send_response(404)
-            self.end_headers()
+            elif path in ("/", "/index.html"):
+                self._serve_file(os.path.join(_HERE, "index.html"), "text/html")
+
+            else:
+                self.send_response(404)
+                self.end_headers()
+        except Exception as e:               # noqa: BLE001 — return JSON, never a raw traceback
+            self._fail(e)
 
     # — POST —
     def do_POST(self):
@@ -176,6 +183,11 @@ class Handler(SimpleHTTPRequestHandler):
                     self._upload()
                 case "/api/ingest":
                     self._ingest(self._body())
+                case "/api/model":
+                    import agent
+                    name = self._body().get("model", "")
+                    agent.set_model(name)
+                    self._json({"ok": True, "model": agent.get_model()})
                 case "/api/query":
                     self._query(self._body())
                 case "/api/learn":
@@ -302,7 +314,11 @@ class Handler(SimpleHTTPRequestHandler):
         path = os.path.join(UPLOAD_DIR, name)
         if not os.path.exists(path):
             return self._json({"error": f"unknown paper: {name}"}, 404)
-        import pageindex_tree
+        try:
+            import pageindex_tree
+        except ModuleNotFoundError:
+            return self._json({"error": "Page Index is an optional feature. "
+                               "Install it with:  pip install litellm pymupdf PyPDF2"}, 200)
         payload = pageindex_tree.build_tree(path)
         self._json(payload)
 

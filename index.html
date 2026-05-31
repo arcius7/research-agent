@@ -67,11 +67,14 @@
   .panel.active { display:block; }
   /* Generic bits */
   .row { display:flex; gap:8px; margin-bottom:12px; }
-  .row input, .row textarea {
+  .row input, .row textarea, .row select {
     flex:1; background:var(--bg); border:1px solid var(--border); color:var(--text);
     border-radius:8px; padding:9px 11px; font-size:13px; font-family:inherit; resize:vertical;
   }
-  .row input:focus, .row textarea:focus { outline:none; border-color:var(--accent2); }
+  .row input:focus, .row textarea:focus, .row select:focus { outline:none; border-color:var(--accent2); }
+  .row select { cursor:pointer; }
+  .field-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px;
+    align-self:center; white-space:nowrap; }
   .hint { color:var(--muted); font-size:12px; margin:4px 0 14px; }
   .spinner { display:inline-block; width:15px; height:15px; border:2px solid var(--border);
     border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite;
@@ -174,12 +177,16 @@
       <!-- ASK -->
       <div class="panel" id="panel-ask">
         <div class="row">
+          <span class="field-label">Model</span>
+          <select id="modelSelect" onchange="setModel()"></select>
+        </div>
+        <div class="row">
           <textarea id="question" rows="3" placeholder="Ask anything about the ingested papers…"></textarea>
         </div>
         <div class="row">
-          <button class="primary" onclick="ask()">Ask Gemma</button>
+          <button class="primary" onclick="ask()">Ask</button>
         </div>
-        <div class="hint">Retrieval over your TurboVec embeddings → answered locally by gemma4:e4b.</div>
+        <div class="hint" id="askHint">Retrieval over your TurboVec embeddings → answered locally.</div>
         <div id="answer"></div>
       </div>
 
@@ -224,15 +231,22 @@ const dz = $('dropzone');
 ['dragover','dragenter'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('drag');}));
 ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('drag');}));
 dz.addEventListener('drop', e=>{ if(e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); });
-$('file').addEventListener('change', e=>{ if(e.target.files[0]) upload(e.target.files[0]); });
+// Reset value so picking the SAME file again still fires 'change'
+$('file').addEventListener('change', e=>{ const f=e.target.files[0]; e.target.value=''; if(f) upload(f); });
 
 async function upload(file){
   if(!file.name.toLowerCase().endsWith('.pdf')) return alert('Please choose a PDF.');
   dz.querySelector('h2').textContent = 'Uploading '+file.name+'…';
-  const res = await fetch('/api/upload',{method:'POST', headers:{'X-Filename':file.name}, body:file});
-  const j = await res.json();
-  setPaper(j.name);
-  ingest(j.name);
+  try{
+    const res = await fetch('/api/upload',{method:'POST', headers:{'X-Filename':file.name}, body:file});
+    const j = await res.json();
+    if(j.error) throw new Error(j.error);
+    setPaper(j.name);
+    ingest(j.name);
+  }catch(e){
+    dz.querySelector('h2').textContent = '📄 Drop a paper here';
+    alert('Upload failed: '+e.message);
+  }
 }
 
 function setPaper(name){
@@ -380,6 +394,25 @@ async function webSearch(){
   }catch(e){ $('web').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
 }
 
+// ── Model picker (dynamic, from Ollama) ──────────────────────────────────────
+async function loadModels(){
+  try{
+    const j = await (await fetch('/api/models')).json();
+    const sel = $('modelSelect');
+    if(!j.models || !j.models.length){ sel.innerHTML = '<option>(no Ollama models)</option>'; return; }
+    sel.innerHTML = j.models.map(m=>`<option value="${m}"${m===j.current?' selected':''}>${m}</option>`).join('');
+    $('askHint').textContent = 'Answered locally by ' + (j.current||j.models[0]) + '.';
+  }catch(e){ $('modelSelect').innerHTML = '<option>(Ollama offline)</option>'; }
+}
+async function setModel(){
+  const name = $('modelSelect').value;
+  try{
+    const j = await (await fetch('/api/model',{method:'POST',headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({model:name})})).json();
+    $('askHint').textContent = 'Answered locally by ' + (j.model||name) + '.';
+  }catch(e){}
+}
+
 // ── Tabs ─────────────────────────────────────────────────────────────────────
 function tab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===name));
@@ -388,6 +421,7 @@ function tab(name){
 
 // Start clean: always show the upload dropzone. Upload a paper when you want.
 // (We deliberately do NOT auto-open the last paper.)
+loadModels();   // populate the model dropdown from Ollama
 </script>
 </body>
 </html>

@@ -621,6 +621,18 @@ def search(question: str) -> list[dict]:
     return agent.invoke(_base(action="search", query=question))["results"]
 
 
+_LEARN_Q = (
+    "Summarize the most important concepts, methods, and findings a student should "
+    "learn from this paper. Write 4 to 6 sentences of clear, spoken prose — no bullet "
+    "points or markdown — suitable to be read aloud."
+)
+
+
+def learn() -> str:
+    """Key things to learn from the ingested paper(s), as read-aloud-ready prose."""
+    return query(_LEARN_Q)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -252,7 +252,9 @@ async function ingest(name){
       <div class="stat">Work session<b>${p.work_minutes??'–'} min</b></div>
       <div class="stat">Chunk size<b>${p.chunk_size??'–'}</b></div>
       <div class="stat">Voice<b>#${p.speaker_id??'–'}</b></div>
-    </div>`;
+    </div>
+    <div class="row"><button class="primary" onclick="learn()">🔊 Read me the key points</button></div>
+    <div id="learn"></div>`;
     refresh();
   }catch(e){ $('profile').innerHTML = `<div class="item"><span class="badge no">ingest failed</span><div class="meta">${e.message}</div></div>`; }
 }
@@ -320,8 +322,35 @@ async function ask(){
     const j = await (await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},
                      body:JSON.stringify({question:q})})).json();
     if(j.error) throw new Error(j.error);
-    $('answer').innerHTML = `<div class="answer">${j.answer}</div>`;
+    $('answer').innerHTML = `<div class="answer">${j.answer}</div>
+      <div class="row" style="margin-top:8px"><button onclick='speak(${JSON.stringify(j.answer)})'>🔊 Listen</button></div>`;
   }catch(e){ $('answer').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+}
+
+// ── Learn (key points, read aloud) ───────────────────────────────────────────
+async function learn(){
+  if(!currentPaper) return;
+  $('learn').innerHTML = '<div class="hint"><span class="spinner"></span>Pulling out the key things to learn…</div>';
+  try{
+    const j = await (await fetch('/api/learn',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+    if(j.error) throw new Error(j.error);
+    $('learn').innerHTML = `<div class="answer">${j.text}</div>`;
+    speak(j.text);
+  }catch(e){ $('learn').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+}
+
+// ── Speak: VITS if a checkpoint exists, else the browser's built-in voice ─────
+async function speak(text){
+  try{
+    const res = await fetch('/api/speak',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+    if(!res.ok) throw new Error('vits-unavailable');
+    const blob = await res.blob();
+    new Audio(URL.createObjectURL(blob)).play();
+  }catch(e){
+    // Fallback — always works, no model download needed
+    speechSynthesis.cancel();
+    speechSynthesis.speak(new SpeechSynthesisUtterance(text));
+  }
 }
 
 // ── Find papers (web) ────────────────────────────────────────────────────────

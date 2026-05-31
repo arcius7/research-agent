@@ -174,6 +174,10 @@ class Handler(SimpleHTTPRequestHandler):
                     self._ingest(self._body())
                 case "/api/query":
                     self._query(self._body())
+                case "/api/learn":
+                    self._learn(self._body())
+                case "/api/speak":
+                    self._speak(self._body())
                 case "/api/references/search":
                     self._ref_search(self._body())
                 case "/api/search":
@@ -261,6 +265,29 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             pass
         self._json({"answer": answer})
+
+    def _learn(self, data):
+        import agent
+        text = agent.learn()
+        self._json({"text": text})
+
+    def _speak(self, data):
+        """Synthesize text with VITS and return audio/wav. 500 → UI falls back
+        to the browser's speech engine."""
+        text = (data.get("text", "") or "").strip()[:1500]
+        if not text:
+            return self._json({"error": "empty text"}, 400)
+        import agent
+        out_path = f"/tmp/speak_{int(time.time())}.wav"
+        agent.synthesize(text, out_path)        # raises if no VITS checkpoint
+        with open(out_path, "rb") as f:
+            content = f.read()
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(content)
 
     def _tree(self, name):
         name = os.path.basename(name or "")

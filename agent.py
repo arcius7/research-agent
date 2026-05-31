@@ -78,8 +78,12 @@ import torch  # noqa: E402
 # ═══════════════════════════════════════════════════════════════════════════════
 
 OLLAMA_BASE  = "http://localhost:11434"
-LLM_MODEL    = "gemma4:e4b"        # ollama pull gemma4:e4b
-EMBED_MODEL  = "nomic-embed-text"  # ollama pull nomic-embed-text
+# gemma4:e4b is 9.6 GB — heavy for a 16 GB Mac. For a much lighter run, pull a
+# small model and set LLM_MODEL (env var wins, no code edit needed):
+#   ollama pull llama3.2:3b      → export LLM_MODEL=llama3.2:3b   (~2 GB)
+#   ollama pull gemma2:2b        → export LLM_MODEL=gemma2:2b     (~1.6 GB)
+LLM_MODEL    = os.environ.get("LLM_MODEL", "gemma4:e4b")
+EMBED_MODEL  = os.environ.get("EMBED_MODEL", "nomic-embed-text")  # only 274 MB — already light
 
 TURBOVEC_DIR = os.path.join(_HERE, ".turbovec_store")
 
@@ -119,19 +123,19 @@ def paper_profile(filename: str, total_chars: int, n_pages: int) -> dict:
       total_chars   int
       n_pages       int
     """
-    # ── chunk size: finer for longer papers ───────────────────────────────────
-    # Short paper → large chunks (more context per embedding)
-    # Long paper  → small chunks (sharper retrieval, more chunks to cover detail)
+    # ── chunk size: bigger chunks = far fewer embeddings (lighter on 16 GB) ────
+    # Still scales down a bit for longer papers, but stays coarse to keep the
+    # number of vectors (and embedding calls) low.
     if total_chars < 8_000:        # ~4 pages
-        chunk_size, overlap = 1400, 200
+        chunk_size, overlap = 1800, 200
     elif total_chars < 25_000:     # ~15 pages
-        chunk_size, overlap = 950, 130
+        chunk_size, overlap = 1500, 180
     elif total_chars < 60_000:     # ~35 pages
-        chunk_size, overlap = 650, 95
+        chunk_size, overlap = 1200, 150
     elif total_chars < 120_000:    # ~70 pages
-        chunk_size, overlap = 450, 65
+        chunk_size, overlap = 1000, 120
     else:                           # thesis / book chapter
-        chunk_size, overlap = 300, 45
+        chunk_size, overlap = 850, 100
 
     # ── Pomodoro: 2 min/page, clamped to [15, 50] min ────────────────────────
     work_minutes = max(15, min(50, n_pages * 2))
@@ -178,20 +182,37 @@ class AgentState(TypedDict):
 # Ollama helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ── Lightweight tuning for 16 GB Macs ─────────────────────────────────────────
+EMBED_BATCH  = 24      # embed this many chunks per request (steady memory)
+LLM_NUM_CTX  = 4096    # cap the context window → smaller KV cache
+LLM_NUM_PRED = 512     # cap answer length (post-mortems are short)
+LLM_KEEPALIVE = "5m"   # unload the model after idle to free RAM
+
+
 def _ollama_embed(texts: list[str]) -> list[list[float]]:
-    resp = requests.post(
-        f"{OLLAMA_BASE}/api/embed",
-        json={"model": EMBED_MODEL, "input": texts},
-        timeout=120,
-    )
-    resp.raise_for_status()
-    return resp.json()["embeddings"]
+    """Embed in small batches so a big paper doesn't spike memory."""
+    out: list[list[float]] = []
+    for i in range(0, len(texts), EMBED_BATCH):
+        resp = requests.post(
+            f"{OLLAMA_BASE}/api/embed",
+            json={"model": EMBED_MODEL, "input": texts[i:i + EMBED_BATCH]},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        out.extend(resp.json()["embeddings"])
+    return out
 
 
 def _ollama_generate(prompt: str) -> str:
     resp = requests.post(
         f"{OLLAMA_BASE}/api/generate",
-        json={"model": LLM_MODEL, "prompt": prompt, "stream": False},
+        json={
+            "model": LLM_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "keep_alive": LLM_KEEPALIVE,
+            "options": {"num_ctx": LLM_NUM_CTX, "num_predict": LLM_NUM_PRED},
+        },
         timeout=300,
     )
     resp.raise_for_status()
@@ -488,7 +509,7 @@ def ingest_node(state: AgentState) -> AgentState:
 def retrieve_node(state: AgentState) -> AgentState:
     query = state.get("query") or ""
     store = _get_store()
-    hits  = store.similarity_search_with_score(query, k=5)
+    hits  = store.similarity_search_with_score(query, k=4)
     return {
         **state,
         "context": [doc.page_content for doc, _ in hits],

@@ -144,21 +144,16 @@
   <!-- RIGHT: panels -->
   <div class="right">
     <div class="tabs">
-      <div class="tab active" data-tab="index"   onclick="tab('index')">Page Index</div>
-      <div class="tab"        data-tab="refs"    onclick="tab('refs')">References</div>
+      <div class="tab active" data-tab="index"   onclick="tab('index')">Summary</div>
       <div class="tab"        data-tab="ask"     onclick="tab('ask')">Ask</div>
+      <div class="tab"        data-tab="refs"    onclick="tab('refs')">References</div>
       <div class="tab"        data-tab="find"    onclick="tab('find')">Find Papers</div>
     </div>
     <div class="tab-body">
 
-      <!-- PAGE INDEX -->
+      <!-- SUMMARY (profile + spoken post-mortem) -->
       <div class="panel active" id="panel-index">
-        <div id="profile"></div>
-        <div class="row">
-          <button class="primary" id="btnTree" onclick="loadTree()" disabled>Build page index</button>
-        </div>
-        <div class="hint">A reasoning-based tree of the paper (PageIndex). Click a section to jump there.</div>
-        <div class="tree" id="tree"></div>
+        <div id="profile"><div class="empty">Upload a paper to begin.</div></div>
       </div>
 
       <!-- REFERENCES -->
@@ -255,7 +250,7 @@ function setPaper(name){
   $('viewer').src = '/api/pdf?name='+encodeURIComponent(name);
   $('viewer').style.display='block';
   dz.style.display='none';
-  ['btnTree','btnRefs'].forEach(id=>$(id).disabled=false);
+  $('btnRefs').disabled = false;
 }
 
 // ── Ingest (embeddings + adaptive profile) ───────────────────────────────────
@@ -278,29 +273,6 @@ async function ingest(name){
     refresh();
   }catch(e){ $('profile').innerHTML = `<div class="item"><span class="badge no">ingest failed</span><div class="meta">${e.message}</div></div>`; }
 }
-
-// ── Page index tree ──────────────────────────────────────────────────────────
-async function loadTree(){
-  if(!currentPaper) return;
-  $('tree').innerHTML = '<div class="hint"><span class="spinner"></span>Building reasoning tree (this calls Gemma per section)…</div>';
-  try{
-    const j = await (await fetch('/api/tree?name='+encodeURIComponent(currentPaper))).json();
-    if(j.error) throw new Error(j.error);
-    $('tree').innerHTML = '<ul>'+renderNodes(j.tree)+'</ul>';
-  }catch(e){ $('tree').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
-}
-function renderNodes(nodes){
-  if(!nodes) return '';
-  if(!Array.isArray(nodes)) nodes = nodes.nodes || [nodes];
-  return nodes.map(n=>{
-    const pp = (n.start_index!=null) ? `<span class="pp">p.${n.start_index}</span>` : '';
-    const jump = n.start_index!=null ? `onclick="jump(${n.start_index})"` : '';
-    const kids = n.nodes ? '<ul>'+renderNodes(n.nodes)+'</ul>' : '';
-    const sum  = n.summary ? `<div class="summary">${n.summary}</div>` : '';
-    return `<li><div class="node" ${jump}><span>${n.title||'Untitled'}</span>${pp}</div>${sum}${kids}</li>`;
-  }).join('');
-}
-function jump(page){ if(currentPaper) $('viewer').src = '/api/pdf?name='+encodeURIComponent(currentPaper)+'#page='+page; }
 
 // ── References ───────────────────────────────────────────────────────────────
 async function loadRefs(){
@@ -342,7 +314,12 @@ async function ask(){
   try{
     const res = await fetch('/api/query_stream',{method:'POST',headers:{'Content-Type':'application/json'},
                  body:JSON.stringify({question:q})});
-    if(!res.ok || !res.body) throw new Error('stream failed');
+    if(!res.ok){
+      let msg = 'request failed ('+res.status+')';
+      try{ const j = await res.json(); if(j.error) msg = j.error; }catch(_){}
+      throw new Error(msg);
+    }
+    if(!res.body) throw new Error('no response stream (is Ollama running?)');
     const reader = res.body.getReader(), dec = new TextDecoder();
     let buf = '';
     while(true){

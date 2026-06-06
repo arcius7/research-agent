@@ -166,6 +166,7 @@ class AgentState(TypedDict):
     # RAG
     files:         list            # paths for "ingest"
     query:         Optional[str]   # question for "query" / "search"
+    paper:         Optional[str]   # restrict retrieval to this paper (source filter)
     context:       list            # retrieved chunks
     answer:        Optional[str]   # LLM response
     results:       list            # raw search hits
@@ -484,15 +485,18 @@ def ingest_node(state: AgentState) -> AgentState:
         profile = paper_profile(fname, total_chars, n_pages)
 
         # ── chunk with sizes tuned to this paper ──────────────────────────────
-        texts, metas = [], []
+        texts, metas, ids = [], [], []
         for text, meta in raw:
             for chunk, cmeta in _chunk(text, meta,
                                        profile["chunk_size"], profile["overlap"]):
                 texts.append(chunk)
                 metas.append(cmeta)
+                # Stable id per (paper, position) → re-uploading the same paper
+                # UPSERTS instead of adding a duplicate copy.
+                ids.append(f"{fname}::{len(ids)}")
 
         if texts:
-            store.add_texts(texts, metadatas=metas)
+            store.add_texts(texts, metadatas=metas, ids=ids)
             ingested.append(fname)
 
         # ── set Pomodoro work duration from paper size ─────────────────────────
@@ -525,10 +529,16 @@ def ingest_node(state: AgentState) -> AgentState:
 # Node: retrieve
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _retrieve(query: str, paper: Optional[str] = None, k: int = 4):
+    """Top-k chunks. When `paper` is set, restrict to that paper's chunks so
+    answers don't bleed in from other ingested papers."""
+    store   = _get_store()
+    flt     = {"source": paper} if paper else None
+    return store.similarity_search_with_score(query, k=k, filter=flt)
+
+
 def retrieve_node(state: AgentState) -> AgentState:
-    query = state.get("query") or ""
-    store = _get_store()
-    hits  = store.similarity_search_with_score(query, k=4)
+    hits = _retrieve(state.get("query") or "", state.get("paper"))
     return {
         **state,
         "context": [doc.page_content for doc, _ in hits],
@@ -571,6 +581,42 @@ def llm_node(state: AgentState) -> AgentState:
         question=question,
     )
     return {**state, "answer": _ollama_generate(prompt)}
+
+
+def stream_answer(question: str, paper: Optional[str] = None):
+    """Generator yielding answer tokens as Ollama produces them (for SSE).
+    Retrieves per-paper context first, then streams the RAG generation."""
+    hits    = _retrieve(question, paper)
+    context = [doc.page_content for doc, _ in hits]
+    if not context:
+        yield "No relevant context found for this paper."
+        return
+    prompt = _RAG_PROMPT.format(
+        context="\n\n---\n\n".join(context),
+        question=question,
+    )
+    with requests.post(
+        f"{OLLAMA_BASE}/api/generate",
+        json={
+            "model": LLM_MODEL,
+            "prompt": prompt,
+            "stream": True,
+            "keep_alive": LLM_KEEPALIVE,
+            "options": {"num_ctx": LLM_NUM_CTX, "num_predict": LLM_NUM_PRED},
+        },
+        timeout=300,
+        stream=True,
+    ) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            obj = json.loads(line)
+            tok = obj.get("response", "")
+            if tok:
+                yield tok
+            if obj.get("done"):
+                break
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -640,7 +686,8 @@ agent = build_graph()
 def _base(**kw) -> AgentState:
     return {
         "action": "tick", "timer": {}, "announce": None, "audio_path": None,
-        "files": [], "query": None, "context": [], "answer": None, "results": [],
+        "files": [], "query": None, "paper": None,
+        "context": [], "answer": None, "results": [],
         "speaker_id": None, "paper_profile": None,
         **kw,
     }
@@ -651,14 +698,14 @@ def ingest(files: list[str]) -> dict:
     return agent.invoke(_base(action="ingest", files=files))
 
 
-def query(question: str) -> str:
-    """Ask a question; returns LLM answer grounded in ingested papers."""
-    return agent.invoke(_base(action="query", query=question))["answer"]
+def query(question: str, paper: Optional[str] = None) -> str:
+    """Ask a question; answer grounded in `paper` (or all papers if None)."""
+    return agent.invoke(_base(action="query", query=question, paper=paper))["answer"]
 
 
-def search(question: str) -> list[dict]:
-    """Raw semantic search — returns top-5 chunks with scores, no LLM."""
-    return agent.invoke(_base(action="search", query=question))["results"]
+def search(question: str, paper: Optional[str] = None) -> list[dict]:
+    """Raw semantic search — top chunks with scores, no LLM."""
+    return agent.invoke(_base(action="search", query=question, paper=paper))["results"]
 
 
 _LEARN_Q = (
@@ -669,9 +716,9 @@ _LEARN_Q = (
 )
 
 
-def learn() -> str:
-    """Spoken post-mortem of the ingested paper, as read-aloud-ready prose."""
-    return query(_LEARN_Q)
+def learn(paper: Optional[str] = None) -> str:
+    """Spoken post-mortem of `paper` (or all papers), as read-aloud-ready prose."""
+    return query(_LEARN_Q, paper=paper)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

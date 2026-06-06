@@ -337,13 +337,32 @@ async function searchRefs(){
 // ── Ask (RAG) ────────────────────────────────────────────────────────────────
 async function ask(){
   const q = $('question').value.trim(); if(!q) return;
-  $('answer').innerHTML = '<div class="hint"><span class="spinner"></span>Retrieving & answering with gemma4:e4b…</div>';
+  $('answer').innerHTML = '<div class="answer" id="ansText"></div><div class="hint" id="ansSpin"><span class="spinner"></span>thinking…</div>';
+  let full = '';
   try{
-    const j = await (await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},
-                     body:JSON.stringify({question:q})})).json();
-    if(j.error) throw new Error(j.error);
-    $('answer').innerHTML = `<div class="answer">${j.answer}</div>
-      <div class="row" style="margin-top:8px"><button onclick='speak(${JSON.stringify(j.answer)})'>🔊 Listen</button></div>`;
+    const res = await fetch('/api/query_stream',{method:'POST',headers:{'Content-Type':'application/json'},
+                 body:JSON.stringify({question:q})});
+    if(!res.ok || !res.body) throw new Error('stream failed');
+    const reader = res.body.getReader(), dec = new TextDecoder();
+    let buf = '';
+    while(true){
+      const {done, value} = await reader.read(); if(done) break;
+      buf += dec.decode(value, {stream:true});
+      const parts = buf.split('\n\n'); buf = parts.pop();
+      for(const p of parts){
+        const line = p.split('\n').find(l=>l.startsWith('data:'));
+        if(!line) continue;
+        let payload; try{ payload = JSON.parse(line.slice(5).trim()); }catch(_){ continue; }
+        if(payload.t){ full += payload.t; $('ansText').textContent = full; }
+        if(payload.error) throw new Error(payload.error);
+      }
+    }
+    if($('ansSpin')) $('ansSpin').remove();
+    if(full.trim()){
+      const bar = document.createElement('div'); bar.className='row'; bar.style.marginTop='8px';
+      bar.innerHTML = `<button onclick='speak(${JSON.stringify(full)})'>🔊 Listen</button>`;
+      $('answer').appendChild(bar);
+    }
   }catch(e){ $('answer').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
 }
 

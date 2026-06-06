@@ -190,6 +190,8 @@ class Handler(SimpleHTTPRequestHandler):
                     self._json({"ok": True, "model": agent.get_model()})
                 case "/api/query":
                     self._query(self._body())
+                case "/api/query_stream":
+                    self._query_stream(self._body())
                 case "/api/learn":
                     self._learn(self._body())
                 case "/api/speak":
@@ -269,12 +271,16 @@ class Handler(SimpleHTTPRequestHandler):
         self._json({"ok": True, "profile": profile, "timer": snapshot,
                     "ingested": result["results"][0]["ingested"]})
 
+    def _current_paper(self) -> str:
+        with state_lock:
+            return state.get("current_paper") or ""
+
     def _query(self, data):
         question = data.get("question", "").strip()
         if not question:
             return self._json({"error": "empty question"}, 400)
         import agent
-        answer = agent.query(question)
+        answer = agent.query(question, paper=self._current_paper() or None)
         try:
             import memory_client
             memory_client.log_query(question, answer)
@@ -282,9 +288,41 @@ class Handler(SimpleHTTPRequestHandler):
             pass
         self._json({"answer": answer})
 
+    def _query_stream(self, data):
+        """Stream the RAG answer token-by-token over Server-Sent Events."""
+        question = data.get("question", "").strip()
+        if not question:
+            return self._json({"error": "empty question"}, 400)
+        import agent
+        paper = self._current_paper() or None
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        full = []
+        try:
+            for tok in agent.stream_answer(question, paper):
+                full.append(tok)
+                self.wfile.write(f"data: {json.dumps({'t': tok})}\n\n".encode())
+                self.wfile.flush()
+            self.wfile.write(b"event: done\ndata: {}\n\n")
+            self.wfile.flush()
+        except Exception as e:                       # noqa: BLE001
+            self.wfile.write(f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n".encode())
+            self.wfile.flush()
+
+        try:
+            import memory_client
+            memory_client.log_query(question, "".join(full))
+        except Exception:
+            pass
+
     def _learn(self, data):
         import agent
-        text = agent.learn()
+        text = agent.learn(paper=self._current_paper() or None)
         self._json({"text": text})
 
     def _speak(self, data):

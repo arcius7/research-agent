@@ -186,18 +186,15 @@ Ordered roughly by how likely they are to bite you.
 
 ### 🔴 High — correctness
 
-1. **One shared vector store for ALL papers.**
-   Every ingested paper goes into the same `.turbovec_store`. `retrieve_node`
-   searches the *whole* store with no per‑paper filter, so when you've ingested
-   several papers, **Ask can pull context from the wrong paper.**
-   *Fix:* tag chunks with the paper name (already in metadata) and filter the
-   search by the current paper, or use one store per paper.
+1. ✅ **FIXED — per‑paper retrieval.**
+   `retrieve_node` now filters by `{"source": current_paper}`, so Ask/post‑mortem
+   only see the paper you're viewing. The server passes `state["current_paper"]`
+   through `query()/learn()`. (Pass `paper=None` to search across all papers.)
 
-2. **Re‑ingesting the same paper duplicates it.**
-   `add_texts` is called without stable ids, so uploading the same PDF twice adds
-   a second full copy of its chunks — inflating the store and skewing retrieval.
-   *Fix:* derive deterministic ids from `(paper, chunk_index)` so re‑ingest
-   upserts instead of appends.
+2. ✅ **FIXED — deterministic chunk ids.**
+   `ingest_node` now writes ids `"{paper}::{i}"`, so re‑uploading the same paper
+   **upserts** instead of appending a duplicate copy. (Edge case: a *different*
+   version of the same filename can leave a few orphan chunks past the new end.)
 
 3. **4‑bit quantized recall is approximate.**
    turbovec stores vectors at 4‑bit; similarity is close but not exact. Fine for
@@ -246,8 +243,11 @@ Ordered roughly by how likely they are to bite you.
 13. **agentmemory is barely wired in.** It's best‑effort logging; nothing in the
     main flow reads it back, so it adds little today.
 
-14. **No streaming.** Long answers block until complete; the UI shows a spinner
-    rather than tokens as they arrive.
+14. ✅ **FIXED — streaming answers.** The Ask tab now streams tokens live via
+    `POST /api/query_stream` (Server‑Sent Events) → `agent.stream_answer()`. The
+    answer appears word‑by‑word instead of after a long blocking wait. (The
+    post‑mortem `learn()` path is still non‑streaming, since it's followed by
+    audio generation.)
 
 ---
 
@@ -270,9 +270,12 @@ ollama list                        # gemma4:e4b / llama3.2:3b + nomic-embed-text
 
 ---
 
-## 9. If I had time for three fixes
+## 9. Top three fixes — ✅ all done
 
-1. **Per‑paper retrieval** (issue #1) — biggest correctness win.
-2. **Deterministic chunk ids** (issue #2) — stops silent duplication.
-3. **Stream LLM answers** (issue #14) — the app would *feel* far faster, which is
-   likely the "it took too much time" complaint.
+1. ✅ **Per‑paper retrieval** (issue #1) — biggest correctness win.
+2. ✅ **Deterministic chunk ids** (issue #2) — stops silent duplication.
+3. ✅ **Stream LLM answers** (issue #14) — the app now *feels* far faster (the
+   likely "it took too much time" complaint).
+
+Next candidates: stream the post‑mortem too, dedup orphan chunks on re‑ingest,
+and wire agentmemory recall into the prompt.

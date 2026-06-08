@@ -62,8 +62,10 @@ VITS_ROOT = os.path.join(_HERE, "vits2")
 if VITS_ROOT not in sys.path:
     sys.path.insert(0, VITS_ROOT)
 
-# ── turbovec ──────────────────────────────────────────────────────────────────
+# ── turbovec + LangChain (LCEL) ───────────────────────────────────────────────
 from turbovec.langchain import TurboQuantVectorStore  # noqa: E402
+from langchain_core.prompts import PromptTemplate       # noqa: E402
+from langchain_core.runnables import RunnableLambda, RunnablePassthrough  # noqa: E402
 
 # ── shared pomodoro state ─────────────────────────────────────────────────────
 from server import state as _timer, state_lock, _advance_mode, _MODE_KEY  # noqa: E402
@@ -583,6 +585,29 @@ def llm_node(state: AgentState) -> AgentState:
     return {**state, "answer": _ollama_generate(prompt)}
 
 
+# ── Idiomatic LCEL RAG chain (retriever → prompt → Ollama) ────────────────────
+# Deterministic Runnable pipeline — no agent loop, so it stays fast and cool.
+
+_RAG_TEMPLATE = PromptTemplate.from_template(_RAG_PROMPT)   # {context} {question}
+
+
+def _format_docs(docs) -> str:
+    return "\n\n---\n\n".join(d.page_content for d in docs)
+
+
+def build_rag_chain(paper: Optional[str] = None):
+    """LangChain Expression Language chain: retrieve (filtered by paper) →
+    prompt → local Ollama. Invoke with the question string."""
+    flt       = {"source": paper} if paper else None
+    retriever = _get_store().as_retriever(search_kwargs={"k": 4, "filter": flt})
+    return (
+        {"context": retriever | RunnableLambda(_format_docs),
+         "question": RunnablePassthrough()}
+        | _RAG_TEMPLATE
+        | RunnableLambda(lambda pv: _ollama_generate(pv.to_string()))
+    )
+
+
 def stream_answer(question: str, paper: Optional[str] = None):
     """Generator yielding answer tokens as Ollama produces them (for SSE).
     Retrieves per-paper context first, then streams the RAG generation."""
@@ -719,8 +744,9 @@ def ingest(files: list[str]) -> dict:
 
 
 def query(question: str, paper: Optional[str] = None) -> str:
-    """Ask a question; answer grounded in `paper` (or all papers if None)."""
-    return agent.invoke(_base(action="query", query=question, paper=paper))["answer"]
+    """Ask a question; answer grounded in `paper` (or all papers if None).
+    Runs the idiomatic LCEL RAG chain."""
+    return build_rag_chain(paper).invoke(question)
 
 
 def search(question: str, paper: Optional[str] = None) -> list[dict]:

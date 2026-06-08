@@ -80,6 +80,31 @@ def _tick() -> None:
                 _advance_mode()
 
 
+# ── Background tasks (run on the serialized job worker) ───────────────────────
+
+def _embed_task(path: str, name: str) -> dict:
+    """Heavy: embed the paper into the vector store."""
+    import agent
+    result = agent.ingest([path])
+    r0 = result["results"][0]
+    try:
+        import memory_client
+        memory_client.log_ingest(name, r0.get("profile") or {})
+    except Exception:
+        pass
+    return {"ingested": r0["ingested"], "total_docs": r0["total_docs"]}
+
+
+def _audio_task(paper: str) -> dict:
+    """Heavy: LLM post-mortem → spoken audio file."""
+    import agent, tts
+    text = agent.learn(paper=paper or None)
+    res  = tts.synthesize(text, paper=paper or "")
+    return {"text": text,
+            "audio_url": f"/api/audio?name={res['filename']}",
+            "voice": res["voice"]}
+
+
 # ── HTTP handler ──────────────────────────────────────────────────────────────
 
 class Handler(SimpleHTTPRequestHandler):
@@ -138,6 +163,11 @@ class Handler(SimpleHTTPRequestHandler):
                 import agent
                 self._json({"models": agent.list_models(), "current": agent.get_model()})
 
+            elif path == "/api/job":
+                import jobs
+                j = jobs.status(qs.get("id", [""])[0])
+                self._json(j if j else {"error": "unknown job"}, 200 if j else 404)
+
             elif path == "/api/pdf":
                 self._serve_pdf(qs.get("name", [""])[0])
 
@@ -194,6 +224,10 @@ class Handler(SimpleHTTPRequestHandler):
                     self._query_stream(self._body())
                 case "/api/learn":
                     self._learn(self._body())
+                case "/api/audio_job":
+                    import jobs
+                    paper = self._current_paper()
+                    self._json({"job_id": jobs.submit("audio", _audio_task, paper)})
                 case "/api/speak":
                     self._speak(self._body())
                 case "/api/references/search":
@@ -243,11 +277,22 @@ class Handler(SimpleHTTPRequestHandler):
         if not name.lower().endswith(".pdf"):
             name += ".pdf"
         data = self._raw_body()
-        with open(os.path.join(UPLOAD_DIR, name), "wb") as f:
+        path = os.path.join(UPLOAD_DIR, name)
+        with open(path, "wb") as f:
             f.write(data)
         with state_lock:
             state["current_paper"] = name
-        self._json({"ok": True, "name": name, "bytes": len(data)})
+
+        # Instant: derive the profile + resize the Pomodoro timer right away.
+        import agent
+        profile = agent.quick_profile(path)
+
+        # Background: embed the paper (heavy) on the serialized worker.
+        import jobs
+        job_id = jobs.submit("embed", _embed_task, path, name)
+
+        self._json({"ok": True, "name": name, "bytes": len(data),
+                    "profile": profile, "job_id": job_id})
 
     def _ingest(self, data):
         name = os.path.basename(data.get("name", ""))
@@ -394,6 +439,9 @@ class Handler(SimpleHTTPRequestHandler):
 def main():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     threading.Thread(target=_tick, daemon=True).start()
+
+    import jobs
+    jobs.start_workers()                 # serialized background worker(s)
 
     port   = int(os.environ.get("PORT", 8765))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)

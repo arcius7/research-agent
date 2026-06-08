@@ -693,8 +693,28 @@ def _base(**kw) -> AgentState:
     }
 
 
+def quick_profile(path: str) -> dict:
+    """FAST path: extract text, derive the profile, and set the Pomodoro timer —
+    NO embedding. Lets the UI show the adjusted timer instantly on upload while
+    the heavy embedding runs in the background."""
+    ext     = Path(path).suffix.lower()
+    extract = _EXTRACTORS.get(ext)
+    if extract is None:
+        raise ValueError(f"Unsupported file type: {ext}")
+    raw         = extract(path)
+    total_chars = sum(len(t) for t, _ in raw)
+    n_pages     = len(raw) if ext == ".pdf" else max(1, total_chars // 2_500)
+    profile     = paper_profile(Path(path).name, total_chars, n_pages)
+    with state_lock:
+        _timer["settings"]["work_duration"] = profile["work_seconds"]
+        _timer["elapsed"] = 0
+        _timer["running"] = False
+        _timer["mode"]    = "work"
+    return profile
+
+
 def ingest(files: list[str]) -> dict:
-    """Ingest files. Returns result including the derived paper profile."""
+    """Ingest files (heavy: embeds). Returns result including the paper profile."""
     return agent.invoke(_base(action="ingest", files=files))
 
 

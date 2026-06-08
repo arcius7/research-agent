@@ -237,7 +237,13 @@ async function upload(file){
     const j = await res.json();
     if(j.error) throw new Error(j.error);
     setPaper(j.name);
-    ingest(j.name);
+    tab('index');
+    renderProfile(j.profile, 'embedding');   // timer adjusts instantly
+    refresh();
+    // Embedding runs in the background (serialized worker, won't overheat)
+    pollJob(j.job_id,
+      ()    => renderProfile(j.profile, 'ready'),
+      (err) => renderProfile(j.profile, 'failed', err));
   }catch(e){
     dz.querySelector('h2').textContent = '📄 Drop a paper here';
     alert('Upload failed: '+e.message);
@@ -253,25 +259,50 @@ function setPaper(name){
   $('btnRefs').disabled = false;
 }
 
-// ── Ingest (embeddings + adaptive profile) ───────────────────────────────────
-async function ingest(name){
-  $('profile').innerHTML = '<div class="hint"><span class="spinner"></span>Embedding paper & deriving session profile…</div>';
-  tab('index');
-  try{
-    const j = await (await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},
-                     body:JSON.stringify({name})})).json();
-    if(j.error) throw new Error(j.error);
-    const p = j.profile||{};
-    $('profile').innerHTML = `<div class="profile">
+// ── Profile card + adaptive timer (rendered instantly on upload) ─────────────
+function renderProfile(p, st, err){
+  p = p || {};
+  const status =
+    st==='ready'  ? '<span class="badge ok">embedded ✓ — Ask is ready</span>' :
+    st==='failed' ? `<span class="badge no">embedding failed</span><span class="meta">${err||''}</span>` :
+                    '<span class="meta"><span class="spinner"></span>embedding in background…</span>';
+  $('profile').innerHTML = `<div class="profile">
       <div class="stat">Pages<b>${p.n_pages??'–'}</b></div>
       <div class="stat">Work session<b>${p.work_minutes??'–'} min</b></div>
       <div class="stat">Chunk size<b>${p.chunk_size??'–'}</b></div>
       <div class="stat">Voice<b>#${p.speaker_id??'–'}</b></div>
     </div>
-    <div class="row"><button class="primary" onclick="learn()">🔊 Read me the key points</button></div>
+    <div class="row">${status}</div>
+    <div class="row"><button class="primary" onclick="makeAudio()">🔊 Make audio summary (download)</button></div>
     <div id="learn"></div>`;
-    refresh();
-  }catch(e){ $('profile').innerHTML = `<div class="item"><span class="badge no">ingest failed</span><div class="meta">${e.message}</div></div>`; }
+  refresh();
+}
+
+// ── Background job polling ───────────────────────────────────────────────────
+async function pollJob(id, onDone, onError){
+  while(true){
+    await new Promise(r=>setTimeout(r, 1500));
+    let j;
+    try{ j = await (await fetch('/api/job?id='+encodeURIComponent(id))).json(); }
+    catch(_){ continue; }            // transient — keep polling
+    if(j.status==='done')  return onDone  && onDone(j.result);
+    if(j.status==='error') return onError && onError(j.error);
+  }
+}
+
+// ── Make audio summary (post-mortem → downloadable file), in background ──────
+async function makeAudio(){
+  $('learn').innerHTML = '<div class="hint"><span class="spinner"></span>Writing the post-mortem & recording audio in the background…</div>';
+  try{
+    const j = await (await fetch('/api/audio_job',{method:'POST'})).json();
+    if(j.error) throw new Error(j.error);
+    pollJob(j.job_id, (res)=>{
+      $('learn').innerHTML = `<div class="answer">${res.text}</div>`;
+      $('audioBar').innerHTML = `<audio controls autoplay src="${res.audio_url}"></audio>
+        <a class="dl" href="${res.audio_url}" download>⤓ download</a>
+        <span class="meta">voice: ${res.voice}</span>`;
+    }, (err)=>{ $('learn').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${err}</div></div>`; });
+  }catch(e){ $('learn').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
 }
 
 // ── References ───────────────────────────────────────────────────────────────
@@ -341,18 +372,6 @@ async function ask(){
       $('answer').appendChild(bar);
     }
   }catch(e){ $('answer').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
-}
-
-// ── Learn (key points, read aloud) ───────────────────────────────────────────
-async function learn(){
-  if(!currentPaper) return;
-  $('learn').innerHTML = '<div class="hint"><span class="spinner"></span>Pulling out the key things to learn…</div>';
-  try{
-    const j = await (await fetch('/api/learn',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
-    if(j.error) throw new Error(j.error);
-    $('learn').innerHTML = `<div class="answer">${j.text}</div>`;
-    speak(j.text);
-  }catch(e){ $('learn').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
 }
 
 // ── Speak: macOS `say` → a real .m4a file (player + download); browser fallback

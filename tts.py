@@ -60,20 +60,64 @@ def voice_for(speaker_id: Optional[int] = None, paper: str = "") -> str:
     return voices[speaker_id % len(voices)]
 
 
+try:
+    import lameenc                       # bundled LAME — no external binary needed
+    _HAS_LAME = True
+except ImportError:
+    _HAS_LAME = False
+
+
+def _wav_to_mp3(wav_path: str, mp3_path: str, bitrate: int = 96) -> None:
+    """Encode a 16-bit PCM WAV to MP3 using lameenc + stdlib wave."""
+    import wave
+    w = wave.open(wav_path, "rb")
+    try:
+        pcm = w.readframes(w.getnframes())
+        enc = lameenc.Encoder()
+        enc.set_bit_rate(bitrate)
+        enc.set_in_sample_rate(w.getframerate())
+        enc.set_channels(w.getnchannels())
+        enc.set_quality(5)               # 2=best/slow … 7=fast
+        data = enc.encode(pcm) + enc.flush()
+    finally:
+        w.close()
+    with open(mp3_path, "wb") as f:
+        f.write(data)
+
+
 def synthesize(text: str, speaker_id: Optional[int] = None, paper: str = "") -> dict:
     """
-    Generate an .m4a audio file from text via macOS `say`.
-    Returns {path, filename, voice}.
+    Generate a downloadable audio file from text via macOS `say`.
+    Produces .mp3 when lameenc is installed, else falls back to .m4a.
+    Returns {path, filename, voice, format}.
     """
     Path(AUDIO_DIR).mkdir(parents=True, exist_ok=True)
-    voice    = voice_for(speaker_id, paper)
-    filename = f"postmortem_{int(time.time())}.m4a"
-    path     = os.path.join(AUDIO_DIR, filename)
+    voice = voice_for(speaker_id, paper)
+    stamp = int(time.time())
 
+    if _HAS_LAME:
+        wav = os.path.join(AUDIO_DIR, f"_tmp_{stamp}.wav")
+        cmd = ["say", "-o", wav, "--file-format=WAVE", "--data-format=LEI16"]
+        if voice:
+            cmd += ["-v", voice]
+        cmd.append(text)
+        subprocess.run(cmd, check=True, timeout=300)
+
+        filename = f"postmortem_{stamp}.mp3"
+        path     = os.path.join(AUDIO_DIR, filename)
+        _wav_to_mp3(wav, path)
+        try:
+            os.remove(wav)
+        except OSError:
+            pass
+        return {"path": path, "filename": filename, "voice": voice or "default", "format": "mp3"}
+
+    # Fallback: AAC .m4a (also downloadable/playable)
+    filename = f"postmortem_{stamp}.m4a"
+    path     = os.path.join(AUDIO_DIR, filename)
     cmd = ["say", "-o", path]
     if voice:
         cmd += ["-v", voice]
     cmd.append(text)
     subprocess.run(cmd, check=True, timeout=300)
-
-    return {"path": path, "filename": filename, "voice": voice or "default"}
+    return {"path": path, "filename": filename, "voice": voice or "default", "format": "m4a"}

@@ -388,7 +388,8 @@ class Handler(SimpleHTTPRequestHandler):
         safe = os.path.basename(name or "")
         path = os.path.join(AUDIO_DIR, safe)
         if safe and os.path.exists(path):
-            self._serve_file(path, "audio/mp4")
+            ctype = "audio/mpeg" if safe.lower().endswith(".mp3") else "audio/mp4"
+            self._serve_file(path, ctype)
         else:
             self.send_response(404); self.end_headers()
 

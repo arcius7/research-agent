@@ -446,12 +446,18 @@ def main():
 
     port   = int(os.environ.get("PORT", 8765))
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    server.daemon_threads = True          # request threads never block Ctrl+C
     print(f"Research Agent running at http://localhost:{port}")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        server.server_close()
         print("\nServer stopped.")
+        os._exit(0)                       # exit immediately, even mid-request
 
 
 if __name__ == "__main__":

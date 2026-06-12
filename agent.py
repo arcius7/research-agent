@@ -225,19 +225,27 @@ def list_models() -> list[str]:
 
 
 def _ollama_generate(prompt: str) -> str:
-    resp = requests.post(
-        f"{OLLAMA_BASE}/api/generate",
-        json={
-            "model": LLM_MODEL,
-            "prompt": prompt,
-            "stream": False,
-            "keep_alive": LLM_KEEPALIVE,
-            "options": {"num_ctx": LLM_NUM_CTX, "num_predict": LLM_NUM_PRED},
-        },
-        timeout=300,
-    )
-    resp.raise_for_status()
-    return resp.json()["response"]
+    """Generate via /api/chat (correct for instruct models like llama3.2).
+    Retries once on an empty response — Ollama occasionally returns nothing on
+    the call that triggers a (re)load."""
+    payload = {
+        "model": LLM_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+        "keep_alive": LLM_KEEPALIVE,
+        # num_predict caps length; we intentionally DON'T pin num_ctx — pinning it
+        # can force Ollama to reload the model after the embedding step (→ slow,
+        # empty responses). Ollama's default context is already 4096 here.
+        "options": {"num_predict": LLM_NUM_PRED},
+    }
+    text = ""
+    for _ in range(2):
+        resp = requests.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=300)
+        resp.raise_for_status()
+        text = resp.json().get("message", {}).get("content", "")
+        if text.strip():
+            return text
+    return text
 
 
 class _OllamaEmbeddings:
@@ -429,9 +437,10 @@ def _chunk(text: str, meta: dict, chunk_size: int, overlap: int) -> list[tuple[s
     """Split text into overlapping chunks sized for this paper."""
     separators = ["\n\n", "\n", ". ", " "]
     chunks, start = [], 0
-    while start < len(text):
-        end = min(start + chunk_size, len(text))
-        if end < len(text):
+    n = len(text)
+    while start < n:
+        end = min(start + chunk_size, n)
+        if end < n:
             for sep in separators:
                 pos = text.rfind(sep, start + overlap, end)
                 if pos != -1:
@@ -440,7 +449,9 @@ def _chunk(text: str, meta: dict, chunk_size: int, overlap: int) -> list[tuple[s
         piece = text[start:end].strip()
         if piece:
             chunks.append((piece, {**meta, "chunk": len(chunks)}))
-        start = end - overlap
+        if end >= n:                          # reached the end → stop
+            break
+        start = max(end - overlap, start + 1)  # always make forward progress
     return chunks
 
 # ── vector store ──────────────────────────────────────────────────────────────
@@ -522,7 +533,7 @@ def ingest_node(state: AgentState) -> AgentState:
         "speaker_id":    profile["speaker_id"] if profile else state.get("speaker_id"),
         "announce":      None,
         "results":       [{"ingested": ingested,
-                           "total_docs": len(store),
+                           "total_docs": len(getattr(store, "_docs", {})),
                            "profile": profile}],
     }
 
@@ -591,8 +602,24 @@ def llm_node(state: AgentState) -> AgentState:
 _RAG_TEMPLATE = PromptTemplate.from_template(_RAG_PROMPT)   # {context} {question}
 
 
+# Cap the retrieved context so prompt-processing stays fast (time-to-first-token).
+# Dense scientific text tokenizes heavily; ~2800 chars keeps prompt eval ~4-5 s.
+CONTEXT_CHAR_CAP = 2800
+
+
+def _join_capped(texts: list[str]) -> str:
+    """Join chunks up to the context cap (whole chunks only)."""
+    out, total = [], 0
+    for t in texts:
+        if out and total + len(t) > CONTEXT_CHAR_CAP:
+            break
+        out.append(t)
+        total += len(t)
+    return "\n\n---\n\n".join(out)
+
+
 def _format_docs(docs) -> str:
-    return "\n\n---\n\n".join(d.page_content for d in docs)
+    return _join_capped([d.page_content for d in docs])
 
 
 def build_rag_chain(paper: Optional[str] = None):
@@ -612,22 +639,19 @@ def stream_answer(question: str, paper: Optional[str] = None):
     """Generator yielding answer tokens as Ollama produces them (for SSE).
     Retrieves per-paper context first, then streams the RAG generation."""
     hits    = _retrieve(question, paper)
-    context = [doc.page_content for doc, _ in hits]
+    context = _join_capped([doc.page_content for doc, _ in hits])
     if not context:
         yield "No relevant context found for this paper."
         return
-    prompt = _RAG_PROMPT.format(
-        context="\n\n---\n\n".join(context),
-        question=question,
-    )
+    prompt = _RAG_PROMPT.format(context=context, question=question)
     with requests.post(
-        f"{OLLAMA_BASE}/api/generate",
+        f"{OLLAMA_BASE}/api/chat",
         json={
             "model": LLM_MODEL,
-            "prompt": prompt,
+            "messages": [{"role": "user", "content": prompt}],
             "stream": True,
             "keep_alive": LLM_KEEPALIVE,
-            "options": {"num_ctx": LLM_NUM_CTX, "num_predict": LLM_NUM_PRED},
+            "options": {"num_predict": LLM_NUM_PRED},
         },
         timeout=300,
         stream=True,
@@ -637,7 +661,7 @@ def stream_answer(question: str, paper: Optional[str] = None):
             if not line:
                 continue
             obj = json.loads(line)
-            tok = obj.get("response", "")
+            tok = obj.get("message", {}).get("content", "")
             if tok:
                 yield tok
             if obj.get("done"):

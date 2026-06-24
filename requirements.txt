@@ -15,6 +15,7 @@ python-docx==1.2.0
 openpyxl==3.1.5
 numpy==2.4.6
 requests==2.34.2
+python-dotenv==1.2.2
 
 # Page Index (optional feature, but bundled so the tab just works)
 litellm==1.86.0

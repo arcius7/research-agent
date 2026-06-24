@@ -24,6 +24,9 @@ import traceback
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
 _HERE       = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR  = os.path.join(_HERE, "uploads")
 AUDIO_DIR   = os.path.join(_HERE, "audio")

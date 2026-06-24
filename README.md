@@ -6,9 +6,11 @@ its **references** and downloads the ones you care about, answers questions abou
 it with a local LLM, and paces your reading with an adaptive **Pomodoro** timer
 that even **speaks** to you.
 
-Everything runs on your machine — no cloud APIs.
+Everything runs on your machine by default — no cloud APIs needed. But if you
+want faster or smarter answers, drop an API key in `.env` and cloud models
+(OpenAI, Anthropic, Google, Groq, Together) appear in the model picker.
 
-![flow](https://img.shields.io/badge/local--first-no_cloud_APIs-3fb950)
+![flow](https://img.shields.io/badge/local--first-cloud_optional-3fb950)
 
 ---
 
@@ -22,7 +24,8 @@ Everything runs on your machine — no cloud APIs.
 | 📚 **References** | Gemma extracts the bibliography; [SearXNG](https://github.com/searxng/searxng) finds & **downloads** the ones matching your query |
 | 🌐 **Find new papers** | Built-in web search via your self-hosted SearXNG |
 | 🍅 **Adaptive Pomodoro** | Work-session length scales with paper size (≈2 min/page) |
-| 🔊 **Voice** | [VITS2](https://github.com/daniilrobnikov/vits2) announces timer transitions; each paper gets a consistent voice |
+| 🔊 **Voice** | macOS `say` TTS with deterministic per-paper voice; downloadable .mp3 post-mortem |
+| ☁️ **Cloud LLMs** | Optional — add an API key in `.env` and use GPT-4o, Claude, Gemini, Groq, or Together models |
 | 🧠 **Research memory** | [agentmemory](https://github.com/rohitg00/agentmemory) remembers papers read, questions asked, refs downloaded (optional) |
 
 ---
@@ -78,12 +81,13 @@ pip install -r requirements.txt
 ollama pull gemma4:e4b && ollama pull nomic-embed-text
 docker compose up -d                      # SearXNG on :8080
 npx @agentmemory/agentmemory              # optional, memory on :3111
+cp .env.example .env                      # optional, for cloud LLMs
 python server.py                          # → http://localhost:8765
 ```
 
 ### Prerequisites
 
-- **[Ollama](https://ollama.com)** — local LLM + embeddings (required)
+- **[Ollama](https://ollama.com)** — local LLM + embeddings (required even when using cloud LLMs, because embeddings always run locally)
 - **Docker** — runs SearXNG for reference search (required for the References/Find tabs)
 - **Node** — only if you want agentmemory's research memory (optional)
 
@@ -116,9 +120,35 @@ python agent.py search "contrastive learning"
 
 ## Configuration
 
+### Cloud LLM setup (optional)
+
+To use paid cloud models instead of (or alongside) local Ollama:
+
+```bash
+cp .env.example .env
+```
+
+Then uncomment and fill in the API key(s) you want:
+
+| Provider | Env variable | Models unlocked |
+|---|---|---|
+| **OpenAI** | `OPENAI_API_KEY` | gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, o3-mini |
+| **Anthropic** | `ANTHROPIC_API_KEY` | claude-sonnet-4-6, claude-haiku-4-5-20251001 |
+| **Google Gemini** | `GEMINI_API_KEY` | gemini-2.5-flash, gemini-2.5-pro |
+| **Groq** | `GROQ_API_KEY` | llama-3.3-70b-versatile, llama-3.1-8b-instant, mixtral-8x7b-32768 |
+| **Together** | `TOGETHER_API_KEY` | Llama-3.3-70B-Instruct-Turbo, Mixtral-8x7B-Instruct-v0.1 |
+
+Cloud models appear in the **model picker** dropdown in the Ask tab. Select one and your questions route through that provider. Switch back to any Ollama model at any time.
+
+> **Note:** Embeddings always run locally via Ollama (`nomic-embed-text`) — only the answer-generation LLM is routed to the cloud. This keeps your paper data local.
+
+### Other settings
+
 | File | Variable | Default |
 |---|---|---|
-| `agent.py` | `LLM_MODEL` / `EMBED_MODEL` | `gemma4:e4b` / `nomic-embed-text` |
+| `.env` | `LLM_MODEL` / `EMBED_MODEL` | `gemma4:e4b` / `nomic-embed-text` |
+| `.env` | `OLLAMA_BASE` | `http://localhost:11434` |
+| `.env` | `PORT` | `8765` |
 | `pageindex_tree.py` | `PAGEINDEX_MODEL` | `ollama_chat/gemma4:e4b` |
 | `searxng_client.py` | `SEARXNG_BASE` | `http://localhost:8080` |
 | `memory_client.py` | `AGENTMEMORY_URL` | `http://localhost:3111` |

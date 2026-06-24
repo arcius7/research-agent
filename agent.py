@@ -50,6 +50,9 @@ import threading
 from pathlib import Path
 from typing import Optional, TypedDict
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
 import requests
 from langgraph.graph import StateGraph, START, END
 
@@ -74,15 +77,195 @@ from server import state as _timer, state_lock, _advance_mode, _MODE_KEY  # noqa
 # Static config
 # ═══════════════════════════════════════════════════════════════════════════════
 
-OLLAMA_BASE  = "http://localhost:11434"
-# gemma4:e4b is 9.6 GB — heavy for a 16 GB Mac. For a much lighter run, pull a
-# small model and set LLM_MODEL (env var wins, no code edit needed):
-#   ollama pull llama3.2:3b      → export LLM_MODEL=llama3.2:3b   (~2 GB)
-#   ollama pull gemma2:2b        → export LLM_MODEL=gemma2:2b     (~1.6 GB)
+OLLAMA_BASE  = os.environ.get("OLLAMA_BASE", "http://localhost:11434")
 LLM_MODEL    = os.environ.get("LLM_MODEL", "gemma4:e4b")
-EMBED_MODEL  = os.environ.get("EMBED_MODEL", "nomic-embed-text")  # only 274 MB — already light
+EMBED_MODEL  = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 
 TURBOVEC_DIR = os.path.join(_HERE, ".turbovec_store")
+
+# ── Cloud LLM provider detection ─────────────────────────────────────────────
+# When an API key is set in .env, we route LLM calls through that provider
+# instead of local Ollama. Embeddings always stay on Ollama (local, free).
+
+_PROVIDERS: dict[str, dict] = {}
+
+def _detect_providers() -> None:
+    """Scan env for known API keys and register available cloud providers."""
+    _PROVIDERS.clear()
+    if os.environ.get("OPENAI_API_KEY"):
+        _PROVIDERS["openai"] = {
+            "key": os.environ["OPENAI_API_KEY"],
+            "url": "https://api.openai.com/v1/chat/completions",
+            "models": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o3-mini"],
+        }
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        _PROVIDERS["anthropic"] = {
+            "key": os.environ["ANTHROPIC_API_KEY"],
+            "url": "https://api.anthropic.com/v1/messages",
+            "models": ["claude-sonnet-4-6", "claude-haiku-4-5-20251001"],
+        }
+    if os.environ.get("GEMINI_API_KEY"):
+        _PROVIDERS["gemini"] = {
+            "key": os.environ["GEMINI_API_KEY"],
+            "url": "https://generativelanguage.googleapis.com/v1beta/chat/completions",
+            "models": ["gemini-2.5-flash", "gemini-2.5-pro"],
+        }
+    if os.environ.get("GROQ_API_KEY"):
+        _PROVIDERS["groq"] = {
+            "key": os.environ["GROQ_API_KEY"],
+            "url": "https://api.groq.com/openai/v1/chat/completions",
+            "models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768"],
+        }
+    if os.environ.get("TOGETHER_API_KEY"):
+        _PROVIDERS["together"] = {
+            "key": os.environ["TOGETHER_API_KEY"],
+            "url": "https://api.together.xyz/v1/chat/completions",
+            "models": ["meta-llama/Llama-3.3-70B-Instruct-Turbo", "mistralai/Mixtral-8x7B-Instruct-v0.1"],
+        }
+
+_detect_providers()
+
+
+def _provider_for_model(model: str) -> tuple[Optional[str], Optional[dict]]:
+    """Return (provider_name, provider_info) if model belongs to a cloud provider."""
+    for name, info in _PROVIDERS.items():
+        if model in info["models"]:
+            return name, info
+    return None, None
+
+
+def _cloud_generate(prompt: str, model: str, provider: str, info: dict) -> str:
+    """Call a cloud LLM's chat completions API."""
+    if provider == "anthropic":
+        resp = requests.post(
+            info["url"],
+            headers={
+                "x-api-key": info["key"],
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": LLM_NUM_PRED,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()["content"][0]["text"]
+
+    if provider == "gemini":
+        resp = requests.post(
+            info["url"],
+            headers={
+                "Authorization": f"Bearer {info['key']}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": LLM_NUM_PRED,
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+    # OpenAI-compatible (openai, groq, together)
+    resp = requests.post(
+        info["url"],
+        headers={
+            "Authorization": f"Bearer {info['key']}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": LLM_NUM_PRED,
+        },
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def _cloud_stream(prompt: str, model: str, provider: str, info: dict):
+    """Stream tokens from a cloud LLM. Yields text chunks."""
+    if provider == "anthropic":
+        resp = requests.post(
+            info["url"],
+            headers={
+                "x-api-key": info["key"],
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": LLM_NUM_PRED,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": True,
+            },
+            timeout=300,
+            stream=True,
+        )
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            text = line.decode()
+            if not text.startswith("data: "):
+                continue
+            data = text[6:]
+            if data.strip() == "[DONE]":
+                break
+            try:
+                obj = json.loads(data)
+                if obj.get("type") == "content_block_delta":
+                    tok = obj.get("delta", {}).get("text", "")
+                    if tok:
+                        yield tok
+            except json.JSONDecodeError:
+                continue
+        return
+
+    # OpenAI-compatible streaming (openai, groq, together, gemini)
+    url = info["url"]
+    headers = {
+        "Authorization": f"Bearer {info['key']}",
+        "Content-Type": "application/json",
+    }
+    if provider == "gemini":
+        headers["Authorization"] = f"Bearer {info['key']}"
+
+    resp = requests.post(
+        url,
+        headers=headers,
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": LLM_NUM_PRED,
+            "stream": True,
+        },
+        timeout=300,
+        stream=True,
+    )
+    resp.raise_for_status()
+    for line in resp.iter_lines():
+        if not line:
+            continue
+        text = line.decode()
+        if not text.startswith("data: "):
+            continue
+        data = text[6:]
+        if data.strip() == "[DONE]":
+            break
+        try:
+            obj = json.loads(data)
+            tok = obj.get("choices", [{}])[0].get("delta", {}).get("content", "")
+            if tok:
+                yield tok
+        except json.JSONDecodeError:
+            continue
 
 # VITS — use "vctk_base" for multi-speaker (109 voices), "ljs_base" for single
 VITS_DATASET    = "vctk_base"
@@ -215,27 +398,31 @@ def get_model() -> str:
 
 
 def list_models() -> list[str]:
-    """Names of models installed in Ollama."""
+    """Names of all available models — local Ollama + cloud providers."""
+    models = []
+    for name, info in _PROVIDERS.items():
+        models.extend(info["models"])
     try:
         r = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=10)
         r.raise_for_status()
-        return [m["name"] for m in r.json().get("models", [])]
+        models.extend(m["name"] for m in r.json().get("models", []))
     except requests.RequestException:
-        return []
+        pass
+    return models
 
 
-def _ollama_generate(prompt: str) -> str:
-    """Generate via /api/chat (correct for instruct models like llama3.2).
-    Retries once on an empty response — Ollama occasionally returns nothing on
-    the call that triggers a (re)load."""
+def _generate(prompt: str) -> str:
+    """Generate a completion. Routes to cloud if the active model belongs to a
+    configured provider, otherwise falls back to local Ollama."""
+    provider, info = _provider_for_model(LLM_MODEL)
+    if provider and info:
+        return _cloud_generate(prompt, LLM_MODEL, provider, info)
+
     payload = {
         "model": LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "keep_alive": LLM_KEEPALIVE,
-        # num_predict caps length; we intentionally DON'T pin num_ctx — pinning it
-        # can force Ollama to reload the model after the embedding step (→ slow,
-        # empty responses). Ollama's default context is already 4096 here.
         "options": {"num_predict": LLM_NUM_PRED},
     }
     text = ""
@@ -593,7 +780,7 @@ def llm_node(state: AgentState) -> AgentState:
         context="\n\n---\n\n".join(context),
         question=question,
     )
-    return {**state, "answer": _ollama_generate(prompt)}
+    return {**state, "answer": _generate(prompt)}
 
 
 # ── Idiomatic LCEL RAG chain (retriever → prompt → Ollama) ────────────────────
@@ -631,19 +818,25 @@ def build_rag_chain(paper: Optional[str] = None):
         {"context": retriever | RunnableLambda(_format_docs),
          "question": RunnablePassthrough()}
         | _RAG_TEMPLATE
-        | RunnableLambda(lambda pv: _ollama_generate(pv.to_string()))
+        | RunnableLambda(lambda pv: _generate(pv.to_string()))
     )
 
 
 def stream_answer(question: str, paper: Optional[str] = None):
-    """Generator yielding answer tokens as Ollama produces them (for SSE).
-    Retrieves per-paper context first, then streams the RAG generation."""
+    """Generator yielding answer tokens as they arrive (for SSE).
+    Routes through cloud provider when the active model is a cloud model."""
     hits    = _retrieve(question, paper)
     context = _join_capped([doc.page_content for doc, _ in hits])
     if not context:
         yield "No relevant context found for this paper."
         return
     prompt = _RAG_PROMPT.format(context=context, question=question)
+
+    provider, info = _provider_for_model(LLM_MODEL)
+    if provider and info:
+        yield from _cloud_stream(prompt, LLM_MODEL, provider, info)
+        return
+
     with requests.post(
         f"{OLLAMA_BASE}/api/chat",
         json={

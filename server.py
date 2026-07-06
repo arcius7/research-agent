@@ -207,13 +207,18 @@ class Handler(SimpleHTTPRequestHandler):
 
     # ── endpoint impls ────────────────────────────────────────────────────────
 
-    def _serve_file(self, path, ctype):
+    def _serve_file(self, path, ctype, inline=False):
         try:
             with open(path, "rb") as f:
                 content = f.read()
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(content)))
+            # `inline` tells the browser to DISPLAY the file (in the viewer
+            # iframe / audio player) instead of downloading it. Without this,
+            # some browsers pop a "save as .pdf" dialog for application/pdf.
+            if inline:
+                self.send_header("Content-Disposition", "inline")
             self.end_headers()
             self.wfile.write(content)
         except FileNotFoundError:
@@ -224,7 +229,7 @@ class Handler(SimpleHTTPRequestHandler):
         safe = os.path.basename(name or "")
         path = os.path.join(UPLOAD_DIR, safe)
         if safe and os.path.exists(path):
-            self._serve_file(path, "application/pdf")
+            self._serve_file(path, "application/pdf", inline=True)
         else:
             self.send_response(404); self.end_headers()
 
@@ -358,7 +363,7 @@ class Handler(SimpleHTTPRequestHandler):
         path = os.path.join(AUDIO_DIR, safe)
         if safe and os.path.exists(path):
             ctype = "audio/mpeg" if safe.lower().endswith(".mp3") else "audio/mp4"
-            self._serve_file(path, ctype)
+            self._serve_file(path, ctype, inline=True)
         else:
             self.send_response(404); self.end_headers()
 

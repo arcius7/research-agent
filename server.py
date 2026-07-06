@@ -27,6 +27,9 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 from timer_state import state, state_lock, advance_mode, start_ticker
+from logging_setup import get_logger
+
+log = get_logger(__name__)
 
 _HERE         = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR    = os.path.join(_HERE, "uploads")
@@ -95,9 +98,22 @@ class Handler(SimpleHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _fail(self, exc: Exception):
-        # Full trace to the server console only — never to the client.
-        traceback.print_exc()
+        # Full trace to the log (file + console) only — never to the client.
+        log.error("%s %s FAILED: %s", self.command, self.path, exc, exc_info=True)
         self._json({"error": str(exc)}, 500)
+
+    # Capture the status code of every response so we can log it.
+    def send_response(self, code, message=None):
+        self._status = code
+        super().send_response(code, message)
+
+    def _log_req(self, t0: float):
+        ms = (time.time() - t0) * 1000
+        status = getattr(self, "_status", "?")
+        # /api/state polls every second — log those at DEBUG so they don't drown
+        # the interesting lines, everything else at INFO.
+        lvl = log.debug if self.path.startswith("/api/state") else log.info
+        lvl("%-4s %-24s → %s  (%.0f ms)", self.command, self.path, status, ms)
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -108,6 +124,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     # — GET —
     def do_GET(self):
+        t0 = time.time()
         parsed = urlparse(self.path)
         path   = parsed.path
         qs     = parse_qs(parsed.query)
@@ -154,9 +171,12 @@ class Handler(SimpleHTTPRequestHandler):
                 self.end_headers()
         except Exception as e:               # noqa: BLE001 — return JSON, never a raw traceback
             self._fail(e)
+        finally:
+            self._log_req(t0)
 
     # — POST —
     def do_POST(self):
+        t0   = time.time()
         path = urlparse(self.path).path
         try:
             match path:
@@ -204,6 +224,8 @@ class Handler(SimpleHTTPRequestHandler):
                     self._json({"error": "Not found"}, 404)
         except Exception as e:               # noqa: BLE001 — surface to the UI
             self._fail(e)
+        finally:
+            self._log_req(t0)
 
     # ── endpoint impls ────────────────────────────────────────────────────────
 
@@ -229,8 +251,11 @@ class Handler(SimpleHTTPRequestHandler):
         safe = os.path.basename(name or "")
         path = os.path.join(UPLOAD_DIR, safe)
         if safe and os.path.exists(path):
+            log.info("serve PDF inline: %s (%.1f KB) — Content-Disposition: inline",
+                     safe, os.path.getsize(path) / 1024)
             self._serve_file(path, "application/pdf", inline=True)
         else:
+            log.warning("PDF not found: %s", safe)
             self.send_response(404); self.end_headers()
 
     def _settings(self, data):
@@ -246,20 +271,26 @@ class Handler(SimpleHTTPRequestHandler):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_UPLOAD_MB * 1024 * 1024:
+            log.warning("upload rejected: %d bytes > %d MB cap", length, MAX_UPLOAD_MB)
             return self._json({"error": f"file too large (max {MAX_UPLOAD_MB} MB)"}, 413)
-        name = os.path.basename(self.headers.get("X-Filename", "") or f"paper_{int(time.time())}.pdf")
+        raw_name = self.headers.get("X-Filename", "")
+        name = os.path.basename(raw_name or f"paper_{int(time.time())}.pdf")
         if not name.lower().endswith(".pdf"):
             name += ".pdf"
         data = self._raw_body()
         path = os.path.join(UPLOAD_DIR, name)
         with open(path, "wb") as f:
             f.write(data)
+        log.info("upload: '%s' → saved as %s (%.1f KB)", raw_name, name, len(data) / 1024)
         with state_lock:
             state["current_paper"] = name
 
         # Instant: derive the profile + resize the Pomodoro timer right away.
         import agent
         profile = agent.quick_profile(path)
+        log.info("profile: %s → %d pages, %d-min session, chunk %d, voice #%s",
+                 name, profile.get("n_pages"), profile.get("work_minutes"),
+                 profile.get("chunk_size"), profile.get("speaker_id"))
 
         # Background: embed the paper (heavy) on the serialized worker.
         import jobs
@@ -314,6 +345,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"error": "empty question"}, 400)
         import agent
         paper = self._current_paper() or None
+        log.info("query (stream): paper=%s model=%s q=%r",
+                 paper, agent.get_model(), question[:80])
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -427,13 +460,17 @@ def main():
     host   = os.environ.get("HOST", "127.0.0.1")   # localhost only by default —
     server = ThreadingHTTPServer((host, port), Handler)  # set HOST=0.0.0.0 to expose on LAN
     server.daemon_threads = True          # request threads never block Ctrl+C
+    from logging_setup import LOG_FILE
+    log.info("Research Agent up on http://%s:%d  (logging to %s)", host, port, LOG_FILE)
     print(f"Research Agent running at http://localhost:{port}")
+    print(f"Logs → {LOG_FILE}")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        log.info("server stopping")
         server.shutdown()
         server.server_close()
         print("\nServer stopped.")

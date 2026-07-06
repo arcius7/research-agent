@@ -20,6 +20,9 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
+from logging_setup import get_logger
+log = get_logger(__name__)
+
 _MAX_WORKERS = max(1, int(os.environ.get("WORKERS", "1")))
 _MAX_KEPT    = 200          # finished jobs retained for status polling
 
@@ -58,6 +61,7 @@ def submit(kind: str, fn: Callable, *args, **kwargs) -> str:
         }
         _evict_locked()
     _q.put((job_id, fn, args, kwargs))
+    log.info("job %s [%s] queued (depth %d)", job_id, kind, _q.qsize())
     return job_id
 
 
@@ -82,12 +86,18 @@ def status(job_id: str) -> Optional[dict]:
 def _worker() -> None:
     while True:
         job_id, fn, args, kwargs = _q.get()
+        kind = _jobs.get(job_id, {}).get("kind", "?")
         _update(job_id, status="running", started=time.time())
+        t0 = time.time()
+        log.info("job %s [%s] started", job_id, kind)
         try:
             result = fn(*args, **kwargs)
             _update(job_id, status="done", result=result, finished=time.time())
+            log.info("job %s [%s] done in %.1fs", job_id, kind, time.time() - t0)
         except Exception as e:                    # noqa: BLE001 — surfaced via status
             _update(job_id, status="error", error=str(e), finished=time.time())
+            log.error("job %s [%s] FAILED in %.1fs: %s",
+                      job_id, kind, time.time() - t0, e, exc_info=True)
         finally:
             _q.task_done()
 

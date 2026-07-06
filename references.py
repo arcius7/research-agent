@@ -22,6 +22,9 @@ import requests
 import searxng_client
 import memory_client
 
+from logging_setup import get_logger
+log = get_logger(__name__)
+
 _HERE        = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(_HERE, "downloaded_refs")
 CACHE_DIR    = os.path.join(_HERE, ".refs_cache")
@@ -66,11 +69,14 @@ def extract_references(pdf_path: str, force: bool = False) -> list[dict]:
     Cached to disk — repeat clicks don't re-run the LLM."""
     cache = os.path.join(CACHE_DIR, Path(pdf_path).stem + ".json")
     if not force and os.path.exists(cache):
+        log.info("references: cache hit for %s", Path(pdf_path).name)
         with open(cache) as f:
             return json.load(f)
 
+    log.info("references: extracting from %s (LLM)", Path(pdf_path).name)
     raw = _raw_reference_text(pdf_path)
     if not raw.strip():
+        log.warning("references: no reference section found in %s", Path(pdf_path).name)
         return []
 
     # agent.generate: /api/chat + retry-on-empty locally, cloud routing when a
@@ -92,6 +98,7 @@ def extract_references(pdf_path: str, force: bool = False) -> list[dict]:
                 "year":    str(r.get("year") or "").strip(),
             })
 
+    log.info("references: extracted %d entries from %s", len(out), Path(pdf_path).name)
     if out:                              # only cache non-empty results
         Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
         with open(cache, "w") as f:

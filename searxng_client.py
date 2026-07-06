@@ -19,6 +19,9 @@ from typing import Optional
 
 import requests
 
+from logging_setup import get_logger
+log = get_logger(__name__)
+
 SEARXNG_BASE = os.environ.get("SEARXNG_BASE", "http://localhost:8080")
 
 # Engines good for academic references
@@ -46,6 +49,7 @@ def search(query: str, categories: str = SCIENCE_CATEGORIES,
 
     Raises a clear error if JSON output isn't enabled or the engine is down.
     """
+    log.info("searxng search: %r (cat=%s)", query[:60], categories)
     try:
         resp = requests.get(
             f"{SEARXNG_BASE}/search",
@@ -54,6 +58,7 @@ def search(query: str, categories: str = SCIENCE_CATEGORIES,
             timeout=30,
         )
     except requests.RequestException as e:
+        log.warning("searxng unreachable at %s: %s", SEARXNG_BASE, e)
         raise RuntimeError(
             f"SearXNG unreachable at {SEARXNG_BASE}. "
             f"Start it with docker compose. ({e})"

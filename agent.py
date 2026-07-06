@@ -44,6 +44,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Optional, TypedDict
 
@@ -52,6 +53,9 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 import requests
 from langgraph.graph import StateGraph, START, END
+
+from logging_setup import get_logger
+log = get_logger(__name__)
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -342,9 +346,14 @@ def generate(prompt: str, max_tokens: Optional[int] = None) -> str:
     if the active model belongs to one, else local Ollama (with retry-on-empty,
     since Ollama occasionally returns nothing on the call that reloads a model)."""
     provider, info = _provider_for_model(LLM_MODEL)
+    _t0 = time.time()
     if provider and info:
-        return _cloud_generate(prompt, LLM_MODEL, provider, info, max_tokens)
+        log.info("generate via CLOUD %s/%s", provider, LLM_MODEL)
+        out = _cloud_generate(prompt, LLM_MODEL, provider, info, max_tokens)
+        log.info("generate done (%s) %d chars in %.1fs", provider, len(out), time.time() - _t0)
+        return out
 
+    log.info("generate via OLLAMA %s", LLM_MODEL)
     payload = {
         "model": LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -353,12 +362,14 @@ def generate(prompt: str, max_tokens: Optional[int] = None) -> str:
         "options": {"num_predict": max_tokens or LLM_NUM_PRED},
     }
     text = ""
-    for _ in range(2):
+    for attempt in range(2):
         resp = requests.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=300)
         resp.raise_for_status()
         text = resp.json().get("message", {}).get("content", "")
         if text.strip():
-            return text
+            break
+        log.warning("empty Ollama response (attempt %d) — retrying", attempt + 1)
+    log.info("generate done (ollama) %d chars in %.1fs", len(text), time.time() - _t0)
     return text
 
 
@@ -520,6 +531,7 @@ def reset_store() -> None:
     with _store_lock:
         _store = TurboQuantVectorStore(embedding=_OllamaEmbeddings(), bit_width=4)
         shutil.rmtree(TURBOVEC_DIR, ignore_errors=True)
+    log.info("store reset (single-paper mode) — previous embeddings wiped")
 
 # ── ingest node ───────────────────────────────────────────────────────────────
 
@@ -569,7 +581,12 @@ def ingest_node(state: AgentState) -> AgentState:
                     store.delete(old_ids)
                 except Exception:
                     pass
+            log.info("embedding %s: %d chunks (%d chars, %d pages) via %s",
+                     fname, len(texts), total_chars, n_pages, EMBED_MODEL)
+            _t0 = time.time()
             store.add_texts(texts, metadatas=metas, ids=ids)
+            log.info("embedded %s: %d chunks in %.1fs",
+                     fname, len(texts), time.time() - _t0)
             ingested.append(fname)
 
         # ── set Pomodoro work duration from paper size ─────────────────────────
@@ -607,7 +624,10 @@ def _retrieve(query: str, paper: Optional[str] = None, k: int = 4):
     In multi-paper mode, `paper` restricts to that paper's chunks."""
     store   = _get_store()
     flt     = None if SINGLE_PAPER else ({"source": paper} if paper else None)
-    return store.similarity_search_with_score(query, k=k, filter=flt)
+    hits    = store.similarity_search_with_score(query, k=k, filter=flt)
+    top     = round(hits[0][1], 3) if hits else None
+    log.info("retrieve: %d hits (top score %s) for %r", len(hits), top, query[:60])
+    return hits
 
 
 def retrieve_node(state: AgentState) -> AgentState:

@@ -16,6 +16,9 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from logging_setup import get_logger
+log = get_logger(__name__)
+
 _HERE     = os.path.dirname(os.path.abspath(__file__))
 AUDIO_DIR = os.path.join(_HERE, "audio")
 
@@ -109,6 +112,8 @@ def synthesize(text: str, speaker_id: Optional[int] = None, paper: str = "") -> 
     _prune_audio()
     voice = voice_for(speaker_id, paper)
     stamp = int(time.time())
+    log.info("TTS: %d chars, voice=%s, format=%s",
+             len(text), voice or "default", "mp3" if _HAS_LAME else "m4a")
 
     if _HAS_LAME:
         wav = os.path.join(AUDIO_DIR, f"_tmp_{stamp}.wav")

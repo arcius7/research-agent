@@ -135,7 +135,7 @@
       <div class="upload-icon">📄</div>
       <h2>Drop a paper here</h2>
       <div>or <button class="primary" onclick="document.getElementById('file').click()">choose a PDF</button></div>
-      <div class="hint">It will be embedded, page-indexed, and its references made searchable.</div>
+      <div class="hint">It will be embedded for Q&amp;A, sized into a Pomodoro session, and its references made searchable.</div>
       <input type="file" id="file" accept="application/pdf" style="display:none" />
     </div>
     <iframe id="viewer" style="display:none"></iframe>
@@ -204,6 +204,11 @@
 const $ = id => document.getElementById(id);
 let currentPaper = null;
 
+// Escape EVERYTHING dynamic that goes into innerHTML — answers, titles and
+// snippets come from the LLM / the open web and may contain markup.
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
 // ── Timer ────────────────────────────────────────────────────────────────────
 async function timer(action){ await fetch('/api/'+action,{method:'POST'}); refresh(); }
 function fmt(s){ const m=Math.floor(s/60), x=s%60; return String(m).padStart(2,'0')+':'+String(x).padStart(2,'0'); }
@@ -264,7 +269,7 @@ function renderProfile(p, st, err){
   p = p || {};
   const status =
     st==='ready'  ? '<span class="badge ok">embedded ✓ — Ask is ready</span>' :
-    st==='failed' ? `<span class="badge no">embedding failed</span><span class="meta">${err||''}</span>` :
+    st==='failed' ? `<span class="badge no">embedding failed</span><span class="meta">${esc(err||'')}</span>` :
                     '<span class="meta"><span class="spinner"></span>embedding in background…</span>';
   $('profile').innerHTML = `<div class="profile">
       <div class="stat">Pages<b>${p.n_pages??'–'}</b></div>
@@ -284,9 +289,10 @@ async function pollJob(id, onDone, onError){
     await new Promise(r=>setTimeout(r, 1500));
     let j;
     try{ j = await (await fetch('/api/job?id='+encodeURIComponent(id))).json(); }
-    catch(_){ continue; }            // transient — keep polling
+    catch(_){ continue; }            // transient network error — keep polling
     if(j.status==='done')  return onDone  && onDone(j.result);
     if(j.status==='error') return onError && onError(j.error);
+    if(!j.status)          return onError && onError(j.error||'job lost (server restarted?)');
   }
 }
 
@@ -297,26 +303,34 @@ async function makeAudio(){
     const j = await (await fetch('/api/audio_job',{method:'POST'})).json();
     if(j.error) throw new Error(j.error);
     pollJob(j.job_id, (res)=>{
-      $('learn').innerHTML = `<div class="answer">${res.text}</div>`;
-      $('audioBar').innerHTML = `<audio controls autoplay src="${res.audio_url}"></audio>
-        <a class="dl" href="${res.audio_url}" download>⤓ download</a>
-        <span class="meta">voice: ${res.voice}</span>`;
-    }, (err)=>{ $('learn').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${err}</div></div>`; });
-  }catch(e){ $('learn').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+      $('learn').innerHTML = `<div class="answer">${esc(res.text)}</div>`;
+      $('audioBar').innerHTML = `<audio controls autoplay src="${esc(res.audio_url)}"></audio>
+        <a class="dl" href="${esc(res.audio_url)}" download>⤓ download</a>
+        <span class="meta">voice: ${esc(res.voice)}</span>`;
+    }, (err)=>{ $('learn').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${esc(err)}</div></div>`; });
+  }catch(e){ $('learn').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${esc(e.message)}</div></div>`; }
 }
 
 // ── References ───────────────────────────────────────────────────────────────
+function renderRefs(j){
+  if(!j.references.length){ $('refs').innerHTML='<div class="empty">No references found.</div>'; return; }
+  $('refs').innerHTML = `<div class="hint">${j.count} references found</div>` + j.references.map(r=>`
+    <div class="item"><div class="title">${esc(r.title)}</div>
+      <div class="meta">${esc([r.authors,r.year].filter(Boolean).join(' · '))}</div></div>`).join('');
+}
 async function loadRefs(){
   if(!currentPaper) return;
-  $('refs').innerHTML = '<div class="hint"><span class="spinner"></span>Extracting references with Gemma…</div>';
+  $('refs').innerHTML = '<div class="hint"><span class="spinner"></span>Extracting references (runs on the background worker)…</div>';
   try{
     const j = await (await fetch('/api/references?name='+encodeURIComponent(currentPaper))).json();
     if(j.error) throw new Error(j.error);
-    if(!j.references.length){ $('refs').innerHTML='<div class="empty">No references found.</div>'; return; }
-    $('refs').innerHTML = `<div class="hint">${j.count} references found</div>` + j.references.map(r=>`
-      <div class="item"><div class="title">${r.title}</div>
-        <div class="meta">${[r.authors,r.year].filter(Boolean).join(' · ')}</div></div>`).join('');
-  }catch(e){ $('refs').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+    if(j.job_id){                      // extraction queued — poll for the result
+      pollJob(j.job_id, renderRefs,
+        (err)=>{ $('refs').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${esc(err)}</div></div>`; });
+      return;
+    }
+    renderRefs(j);                     // cached — instant
+  }catch(e){ $('refs').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${esc(e.message)}</div></div>`; }
 }
 async function searchRefs(){
   if(!currentPaper) return;
@@ -328,13 +342,13 @@ async function searchRefs(){
     if(j.error) throw new Error(j.error);
     if(!j.downloaded.length){ $('refs').innerHTML='<div class="empty">No matching references to download.</div>'; return; }
     $('refs').innerHTML = j.downloaded.map(d=>`
-      <div class="item"><div class="title">${d.title}</div>
+      <div class="item"><div class="title">${esc(d.title)}</div>
         <div class="acts">${ d.path ? '<span class="badge ok">downloaded</span>'
           : d.found ? '<span class="badge no">no PDF</span>' : '<span class="badge no">not found</span>' }
-          ${ d.page_url ? `<a href="${d.page_url}" target="_blank">source ↗</a>`:'' }</div>
-        ${ d.error?`<div class="meta">${d.error}</div>`:'' }
-        ${ d.path?`<div class="meta">→ ${d.path}</div>`:'' }</div>`).join('');
-  }catch(e){ $('refs').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+          ${ d.page_url ? `<a href="${esc(d.page_url)}" target="_blank">source ↗</a>`:'' }</div>
+        ${ d.error?`<div class="meta">${esc(d.error)}</div>`:'' }
+        ${ d.path?`<div class="meta">→ ${esc(d.path)}</div>`:'' }</div>`).join('');
+  }catch(e){ $('refs').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${esc(e.message)}</div></div>`; }
 }
 
 // ── Ask (RAG) ────────────────────────────────────────────────────────────────
@@ -367,11 +381,14 @@ async function ask(){
     }
     if($('ansSpin')) $('ansSpin').remove();
     if(full.trim()){
+      // Real event listener — inline onclick breaks on quotes in the answer.
       const bar = document.createElement('div'); bar.className='row'; bar.style.marginTop='8px';
-      bar.innerHTML = `<button onclick='speak(${JSON.stringify(full)})'>🔊 Listen</button>`;
+      const btn = document.createElement('button'); btn.textContent = '🔊 Listen';
+      btn.addEventListener('click', ()=>speak(full));
+      bar.appendChild(btn);
       $('answer').appendChild(bar);
     }
-  }catch(e){ $('answer').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+  }catch(e){ $('answer').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${esc(e.message)}</div></div>`; }
 }
 
 // ── Speak: macOS `say` → a real .m4a file (player + download); browser fallback
@@ -383,9 +400,9 @@ async function speak(text){
     if(!res.ok) throw new Error('say-failed');
     const j = await res.json();
     if(j.error) throw new Error(j.error);
-    $('audioBar').innerHTML = `<audio controls autoplay src="${j.audio_url}"></audio>
-      <a class="dl" href="${j.audio_url}" download>⤓ download</a>
-      <span class="meta">voice: ${j.voice}</span>`;
+    $('audioBar').innerHTML = `<audio controls autoplay src="${esc(j.audio_url)}"></audio>
+      <a class="dl" href="${esc(j.audio_url)}" download>⤓ download</a>
+      <span class="meta">voice: ${esc(j.voice)}</span>`;
   }catch(e){
     // Fallback — browser voice (no saved file)
     $('audioBar').innerHTML = '<span class="meta">playing in browser (no file)</span>';
@@ -404,27 +421,37 @@ async function webSearch(){
     if(j.error) throw new Error(j.error);
     if(!j.results.length){ $('web').innerHTML='<div class="empty">No results.</div>'; return; }
     $('web').innerHTML = j.results.map(r=>`
-      <div class="item"><div class="title"><a href="${r.url}" target="_blank">${r.title}</a></div>
-        <div class="meta">${(r.content||'').slice(0,160)}</div></div>`).join('');
-  }catch(e){ $('web').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${e.message}</div></div>`; }
+      <div class="item"><div class="title"><a href="${esc(r.url)}" target="_blank">${esc(r.title)}</a></div>
+        <div class="meta">${esc((r.content||'').slice(0,160))}</div></div>`).join('');
+  }catch(e){ $('web').innerHTML = `<div class="item"><span class="badge no">failed</span><div class="meta">${esc(e.message)}</div></div>`; }
 }
 
-// ── Model picker (dynamic, from Ollama) ──────────────────────────────────────
+// ── Model picker (local Ollama models + cloud models from .env keys) ─────────
+let cloudModels = [];
+function modelHint(name){
+  const kind = cloudModels.includes(name) ? 'in the cloud' : 'locally';
+  $('askHint').textContent = 'Answered ' + kind + ' by ' + name + '.';
+}
 async function loadModels(){
   try{
     const j = await (await fetch('/api/models')).json();
     const sel = $('modelSelect');
-    if(!j.models || !j.models.length){ sel.innerHTML = '<option>(no Ollama models)</option>'; return; }
-    sel.innerHTML = j.models.map(m=>`<option value="${m}"${m===j.current?' selected':''}>${m}</option>`).join('');
-    $('askHint').textContent = 'Answered locally by ' + (j.current||j.models[0]) + '.';
-  }catch(e){ $('modelSelect').innerHTML = '<option>(Ollama offline)</option>'; }
+    cloudModels = j.cloud || [];
+    const opt = m => `<option value="${esc(m)}"${m===j.current?' selected':''}>${esc(m)}</option>`;
+    let html = '';
+    if((j.local||[]).length) html += `<optgroup label="Local (Ollama)">${j.local.map(opt).join('')}</optgroup>`;
+    if(cloudModels.length)   html += `<optgroup label="Cloud (.env keys)">${cloudModels.map(opt).join('')}</optgroup>`;
+    if(!html){ sel.innerHTML = '<option>(no models — is Ollama running?)</option>'; return; }
+    sel.innerHTML = html;
+    modelHint(j.current || sel.value);
+  }catch(e){ $('modelSelect').innerHTML = '<option>(server offline)</option>'; }
 }
 async function setModel(){
   const name = $('modelSelect').value;
   try{
     const j = await (await fetch('/api/model',{method:'POST',headers:{'Content-Type':'application/json'},
               body:JSON.stringify({model:name})})).json();
-    $('askHint').textContent = 'Answered locally by ' + (j.model||name) + '.';
+    modelHint(j.model||name);
   }catch(e){}
 }
 

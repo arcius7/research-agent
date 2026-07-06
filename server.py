@@ -19,7 +19,6 @@ dependency only breaks the one endpoint that needs it.
 import json
 import os
 import time
-import threading
 import traceback
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -27,60 +26,12 @@ from urllib.parse import urlparse, parse_qs
 from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
-_HERE       = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_DIR  = os.path.join(_HERE, "uploads")
-AUDIO_DIR   = os.path.join(_HERE, "audio")
+from timer_state import state, state_lock, advance_mode, start_ticker
 
-# ── Timer state ───────────────────────────────────────────────────────────────
-
-state: dict = {
-    "mode": "work",
-    "running": False,
-    "elapsed": 0,
-    "session_count": 0,
-    "tasks": [],
-    "current_paper": None,
-    "settings": {
-        "work_duration":       25 * 60,
-        "short_break":          5 * 60,
-        "long_break":          15 * 60,
-        "long_break_interval": 4,
-    },
-}
-
-state_lock = threading.Lock()
-
-_MODE_KEY = {
-    "work":        "work_duration",
-    "short_break": "short_break",
-    "long_break":  "long_break",
-}
-
-
-def _advance_mode() -> None:
-    """Transition to the next mode. Must be called under state_lock."""
-    if state["mode"] == "work":
-        state["session_count"] += 1
-        interval = state["settings"]["long_break_interval"]
-        state["mode"] = (
-            "long_break" if state["session_count"] % interval == 0
-            else "short_break"
-        )
-    else:
-        state["mode"] = "work"
-    state["elapsed"] = 0
-    state["running"] = False
-
-
-def _tick() -> None:
-    while True:
-        time.sleep(1)
-        with state_lock:
-            if not state["running"]:
-                continue
-            state["elapsed"] += 1
-            if state["elapsed"] >= state["settings"][_MODE_KEY[state["mode"]]]:
-                _advance_mode()
+_HERE         = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_DIR    = os.path.join(_HERE, "uploads")
+AUDIO_DIR     = os.path.join(_HERE, "audio")
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "100"))
 
 
 # ── Background tasks (run on the serialized job worker) ───────────────────────
@@ -96,6 +47,13 @@ def _embed_task(path: str, name: str) -> dict:
     except Exception:
         pass
     return {"ingested": r0["ingested"], "total_docs": r0["total_docs"]}
+
+
+def _refs_task(path: str, name: str) -> dict:
+    """Heavy: LLM reference extraction (result is cached to disk)."""
+    import references
+    refs = references.extract_references(path)
+    return {"paper": name, "count": len(refs), "references": refs}
 
 
 def _audio_task(paper: str) -> dict:
@@ -137,7 +95,9 @@ class Handler(SimpleHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _fail(self, exc: Exception):
-        self._json({"error": str(exc), "trace": traceback.format_exc()}, 500)
+        # Full trace to the server console only — never to the client.
+        traceback.print_exc()
+        self._json({"error": str(exc)}, 500)
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -164,7 +124,10 @@ class Handler(SimpleHTTPRequestHandler):
 
             elif path == "/api/models":
                 import agent
-                self._json({"models": agent.list_models(), "current": agent.get_model()})
+                m = agent.list_models()          # {"local": [...], "cloud": [...]}
+                self._json({"models": m["local"] + m["cloud"],   # back-compat flat list
+                            "local": m["local"], "cloud": m["cloud"],
+                            "current": agent.get_model()})
 
             elif path == "/api/job":
                 import jobs
@@ -208,7 +171,7 @@ class Handler(SimpleHTTPRequestHandler):
                         state["running"] = False; state["elapsed"] = 0
                     self._json({"ok": True})
                 case "/api/skip":
-                    with state_lock: _advance_mode()
+                    with state_lock: advance_mode()
                     self._json({"ok": True})
                 case "/api/settings":
                     self._settings(self._body())
@@ -276,6 +239,9 @@ class Handler(SimpleHTTPRequestHandler):
 
     def _upload(self):
         os.makedirs(UPLOAD_DIR, exist_ok=True)
+        length = int(self.headers.get("Content-Length", 0))
+        if length > MAX_UPLOAD_MB * 1024 * 1024:
+            return self._json({"error": f"file too large (max {MAX_UPLOAD_MB} MB)"}, 413)
         name = os.path.basename(self.headers.get("X-Filename", "") or f"paper_{int(time.time())}.pdf")
         if not name.lower().endswith(".pdf"):
             name += ".pdf"
@@ -405,18 +371,23 @@ class Handler(SimpleHTTPRequestHandler):
             import pageindex_tree
         except ModuleNotFoundError:
             return self._json({"error": "Page Index is an optional feature. "
-                               "Install it with:  pip install litellm pymupdf PyPDF2"}, 200)
+                               "Install it with:  pip install -r requirements-pageindex.txt"}, 200)
         payload = pageindex_tree.build_tree(path)
         self._json(payload)
 
     def _references(self, name):
+        """LLM-heavy → runs on the serialized job worker (anti-overheat), except
+        when the result is already cached, which returns instantly."""
         name = os.path.basename(name or "")
         path = os.path.join(UPLOAD_DIR, name)
         if not os.path.exists(path):
             return self._json({"error": f"unknown paper: {name}"}, 404)
-        import references
-        refs = references.extract_references(path)
-        self._json({"paper": name, "count": len(refs), "references": refs})
+        import references, jobs
+        cache = os.path.join(references.CACHE_DIR, os.path.splitext(name)[0] + ".json")
+        if os.path.exists(cache):
+            refs = references.extract_references(path)      # cache hit — instant
+            return self._json({"paper": name, "count": len(refs), "references": refs})
+        self._json({"job_id": jobs.submit("references", _refs_task, path, name)})
 
     def _ref_search(self, data):
         name  = os.path.basename(data.get("name", ""))
@@ -442,13 +413,14 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
-    threading.Thread(target=_tick, daemon=True).start()
+    start_ticker()
 
     import jobs
     jobs.start_workers()                 # serialized background worker(s)
 
     port   = int(os.environ.get("PORT", 8765))
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    host   = os.environ.get("HOST", "127.0.0.1")   # localhost only by default —
+    server = ThreadingHTTPServer((host, port), Handler)  # set HOST=0.0.0.0 to expose on LAN
     server.daemon_threads = True          # request threads never block Ctrl+C
     print(f"Research Agent running at http://localhost:{port}")
     print("Press Ctrl+C to stop.")

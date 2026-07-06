@@ -24,9 +24,7 @@ import memory_client
 
 _HERE        = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(_HERE, "downloaded_refs")
-
-OLLAMA_BASE = os.environ.get("OLLAMA_BASE", "http://localhost:11434")
-LLM_MODEL   = os.environ.get("LLM_MODEL", "gemma4:e4b")
+CACHE_DIR    = os.path.join(_HERE, ".refs_cache")
 
 _REF_HEADINGS = re.compile(
     r"\n\s*(references|bibliography|works cited|literature cited)\s*\n",
@@ -63,29 +61,29 @@ Reference section:
 JSON array:"""
 
 
-def extract_references(pdf_path: str) -> list[dict]:
-    """Extract a structured reference list from a paper using Gemma."""
+def extract_references(pdf_path: str, force: bool = False) -> list[dict]:
+    """Extract a structured reference list from a paper with the active LLM.
+    Cached to disk — repeat clicks don't re-run the LLM."""
+    cache = os.path.join(CACHE_DIR, Path(pdf_path).stem + ".json")
+    if not force and os.path.exists(cache):
+        with open(cache) as f:
+            return json.load(f)
+
     raw = _raw_reference_text(pdf_path)
     if not raw.strip():
         return []
 
-    resp = requests.post(
-        f"{OLLAMA_BASE}/api/generate",
-        json={
-            "model": LLM_MODEL,
-            "prompt": _EXTRACT_PROMPT.format(refs=raw),
-            "stream": False,
-            "format": "json",          # ask Ollama to constrain to JSON
-        },
-        timeout=300,
-    )
-    resp.raise_for_status()
-    text = resp.json()["response"]
+    # agent.generate: /api/chat + retry-on-empty locally, cloud routing when a
+    # paid model is active. Reference lists are long — allow up to 2048 tokens.
+    import agent
+    text = agent.generate(_EXTRACT_PROMPT.format(refs=raw), max_tokens=2048)
 
     refs = _coerce_json_list(text)
     # Normalise + drop entries with no title
     out = []
     for r in refs:
+        if not isinstance(r, dict):
+            continue
         title = (r.get("title") or "").strip()
         if len(title) > 5:
             out.append({
@@ -93,6 +91,11 @@ def extract_references(pdf_path: str) -> list[dict]:
                 "authors": (r.get("authors") or "").strip(),
                 "year":    str(r.get("year") or "").strip(),
             })
+
+    if out:                              # only cache non-empty results
+        Path(CACHE_DIR).mkdir(parents=True, exist_ok=True)
+        with open(cache, "w") as f:
+            json.dump(out, f, indent=2)
     return out
 
 

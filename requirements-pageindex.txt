@@ -1,0 +1,9 @@
+# Optional: PageIndex reasoning-tree feature (/api/tree endpoint).
+# Heavy deps kept out of the core install on purpose.
+#
+#   pip install -r requirements-pageindex.txt
+
+litellm==1.86.0
+PyPDF2==3.0.1
+pymupdf==1.26.4
+PyYAML==6.0.3

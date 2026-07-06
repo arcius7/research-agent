@@ -19,7 +19,7 @@ want faster or smarter answers, drop an API key in `.env` and cloud models
 | Capability | How |
 |---|---|
 | 📄 **Upload & view** papers | Drag-drop PDF → embedded viewer with page jumps |
-| 🌲 **Page Index** | [PageIndex](https://github.com/VectifyAI/PageIndex) builds a reasoning tree (table-of-contents) — click a section to jump there |
+| 🌲 **Page Index** *(optional)* | [PageIndex](https://github.com/VectifyAI/PageIndex) reasoning tree via `/api/tree` — needs `pip install -r requirements-pageindex.txt` |
 | 🔎 **Embeddings & RAG** | Chunks → [nomic-embed-text] → [turbovec](https://github.com/arcius7/turbovec) 4-bit quantized store → answered by **gemma4:e4b** |
 | 📚 **References** | Gemma extracts the bibliography; [SearXNG](https://github.com/searxng/searxng) finds & **downloads** the ones matching your query |
 | 🌐 **Find new papers** | Built-in web search via your self-hosted SearXNG |
@@ -34,23 +34,23 @@ want faster or smarter answers, drop an API key in `.env` and cloud models
 
 ```
                          ┌─────────────── Frontend (index.html) ───────────────┐
-                         │  PDF viewer │ Page Index │ References │ Ask │ Find    │
+                         │  PDF viewer │ Summary │ Ask │ References │ Find      │
                          └───────────────────────┬─────────────────────────────┘
-                                                 │  REST
+                                                 │  REST + SSE
                          ┌───────────────────────▼─────────────────────────────┐
-                         │                   server.py                          │
-                         │  upload · pdf · ingest · tree · references · query   │
-                         └──┬───────┬──────────┬───────────┬──────────┬─────────┘
-              ┌─────────────┘       │          │           │          └──────────────┐
-              ▼                     ▼          ▼           ▼                         ▼
-        agent.py             pageindex_   references.py  searxng_           memory_client.py
-        (LangGraph)          tree.py      ┌──────────┐   client.py          ┌──────────────┐
-   ┌────────────────┐    ┌────────────┐   │ Gemma     │  ┌────────────┐     │ agentmemory  │
-   │ ingest→turbovec│    │ PageIndex  │   │ extract → │  │  SearXNG   │     │  REST :3111  │
-   │ retrieve→gemma │    │ → Ollama   │   │ SearXNG ↓ │  │  Docker    │     └──────────────┘
-   │ pomodoro→vits  │    └────────────┘   └──────────┘  │  :8080 JSON│
-   └────────────────┘                                   └────────────┘
-                              Ollama (gemma4:e4b + nomic-embed-text) :11434
+                         │        server.py  (+ jobs.py serialized worker)      │
+                         │  upload · query_stream · audio_job · references · …  │
+                         └──┬────────┬──────────┬───────────┬─────────┬─────────┘
+              ┌────────────┘        │          │           │         └──────────────┐
+              ▼                     ▼          ▼           ▼                        ▼
+        agent.py               tts.py     references.py  searxng_          memory_client.py
+        (LangGraph)          ┌────────┐   ┌──────────┐   client.py         ┌──────────────┐
+   ┌────────────────┐        │ say →  │   │ LLM       │  ┌────────────┐    │ agentmemory  │
+   │ ingest→turbovec│        │ .mp3   │   │ extract → │  │  SearXNG   │    │  REST :3111  │
+   │ retrieve→LLM   │        └────────┘   │ SearXNG ↓ │  │  Docker    │    └──────────────┘
+   │ pomodoro timer │  timer_state.py     └──────────┘  │  :8080 JSON│
+   └────────────────┘  (shared state)                   └────────────┘
+          Ollama :11434 (LLM + nomic-embed-text)  — or cloud LLMs via .env keys
 ```
 
 ### Submodules (all under this folder)
@@ -96,13 +96,15 @@ python server.py                          # → http://localhost:8765
 ## Use it
 
 1. **`python server.py`** and open **http://localhost:8765**
-2. **Drop a PDF** — it auto-embeds and shows an adaptive session profile
-   (pages, work-minutes, chunk size, voice).
-3. **Page Index** tab → *Build page index* → click sections to jump in the PDF.
-4. **References** tab → *Extract references*, then type a topic
-   (e.g. `attention`) → *Search & download* pulls matching cited papers into
+2. **Drop a PDF** — the Pomodoro timer resizes instantly; embedding runs on the
+   background worker (won't overheat the machine).
+3. **Summary** tab → *Make audio summary* → spoken post-mortem as a
+   downloadable .mp3.
+4. **References** tab → *Extract references* (background job, cached), then
+   type a topic → *Search & download* pulls matching cited papers into
    `downloaded_refs/`.
-5. **Ask** tab → ask anything; retrieval + gemma4:e4b answer grounded in the paper.
+5. **Ask** tab → pick a model (local or cloud), ask anything; the answer
+   streams in, grounded in the paper.
 6. **Find Papers** tab → web search via SearXNG for brand-new papers.
 
 The Pomodoro timer (top-right) is sized to the paper and speaks at each
@@ -148,7 +150,9 @@ Cloud models appear in the **model picker** dropdown in the Ask tab. Select one 
 |---|---|---|
 | `.env` | `LLM_MODEL` / `EMBED_MODEL` | `gemma4:e4b` / `nomic-embed-text` |
 | `.env` | `OLLAMA_BASE` | `http://localhost:11434` |
-| `.env` | `PORT` | `8765` |
+| `.env` | `PORT` / `HOST` | `8765` / `127.0.0.1` (set `HOST=0.0.0.0` for LAN) |
+| `.env` | `CLOUD_NUM_PRED` | `2048` — max answer tokens on cloud models |
+| `.env` | `MAX_UPLOAD_MB` | `100` |
 | `pageindex_tree.py` | `PAGEINDEX_MODEL` | `ollama_chat/gemma4:e4b` |
 | `searxng_client.py` | `SEARXNG_BASE` | `http://localhost:8080` |
 | `memory_client.py` | `AGENTMEMORY_URL` | `http://localhost:3111` |

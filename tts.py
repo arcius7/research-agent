@@ -85,6 +85,20 @@ def _wav_to_mp3(wav_path: str, mp3_path: str, bitrate: int = 96) -> None:
         f.write(data)
 
 
+_KEEP_NEWEST = 20   # generated audio files retained; older ones are pruned
+
+
+def _prune_audio() -> None:
+    """Keep only the newest N generated files so audio/ doesn't grow forever."""
+    try:
+        files = sorted(Path(AUDIO_DIR).glob("postmortem_*"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in files[_KEEP_NEWEST:]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def synthesize(text: str, speaker_id: Optional[int] = None, paper: str = "") -> dict:
     """
     Generate a downloadable audio file from text via macOS `say`.
@@ -92,6 +106,7 @@ def synthesize(text: str, speaker_id: Optional[int] = None, paper: str = "") -> 
     Returns {path, filename, voice, format}.
     """
     Path(AUDIO_DIR).mkdir(parents=True, exist_ok=True)
+    _prune_audio()
     voice = voice_for(speaker_id, paper)
     stamp = int(time.time())
 

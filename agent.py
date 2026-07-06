@@ -13,30 +13,29 @@ automatically:
   2. Pomodoro     — work-session duration set to ≈ 2 min/page so the timer
      duration       scales with how long the paper actually takes to read.
 
-  3. VITS voice   — a speaker ID is picked deterministically from the paper's
-                    filename, giving each paper a consistent, distinct voice.
+  3. Voice        — a speaker ID is picked deterministically from the paper's
+                    filename, giving each paper a consistent, distinct voice
+                    (rendered by macOS `say` in tts.py).
 
 Nodes
 ─────
   ingest     PDF / Word / Excel / JSON → adaptive chunks → nomic-embed-text
-             → turbovec 4-bit quantized store → updates Pomodoro timer →
-             VITS announces the session profile
+             → turbovec 4-bit quantized store → updates Pomodoro timer
 
   retrieve   ANN similarity search → fills context
 
-  llm        Ollama gemma4:e4b RAG answer over retrieved context
+  llm        RAG answer over retrieved context (local Ollama, or a cloud
+             provider when its API key is set in .env)
 
   pomodoro   Pomodoro timer (25/5/15 min default, overridden by paper size)
-
-  vits       VITS2 TTS — uses the speaker assigned to the current paper
 
 Graph routing
 ─────────────
   START → dispatch
-    "ingest"        → ingest → vits → END
+    "ingest"        → ingest → END
     "query"         → retrieve → llm → END
     "search"        → retrieve → END
-    timer actions   → pomodoro → vits → END
+    timer actions   → pomodoro → END
 """
 
 from __future__ import annotations
@@ -44,8 +43,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
-import time
 import threading
 from pathlib import Path
 from typing import Optional, TypedDict
@@ -56,22 +53,19 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 import requests
 from langgraph.graph import StateGraph, START, END
 
-# ── VITS2 (submodule: vits2/) — imported LAZILY inside _load_vits() so the agent
-#    runs without torch. Audio normally comes from macOS `say` (tts.py); VITS is
-#    only touched if you explicitly install torch and call synthesize(). ─────────
-
-_HERE     = os.path.dirname(os.path.abspath(__file__))
-VITS_ROOT = os.path.join(_HERE, "vits2")
-if VITS_ROOT not in sys.path:
-    sys.path.insert(0, VITS_ROOT)
+_HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ── turbovec + LangChain (LCEL) ───────────────────────────────────────────────
 from turbovec.langchain import TurboQuantVectorStore  # noqa: E402
 from langchain_core.prompts import PromptTemplate       # noqa: E402
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough  # noqa: E402
 
-# ── shared pomodoro state ─────────────────────────────────────────────────────
-from server import state as _timer, state_lock, _advance_mode, _MODE_KEY  # noqa: E402
+# ── shared pomodoro state (dedicated module — NOT server.py, which would load
+#    twice and split the state when the server runs as __main__) ───────────────
+from timer_state import (  # noqa: E402
+    state as _timer, state_lock,
+    advance_mode as _advance_mode, MODE_KEY as _MODE_KEY,
+)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Static config
@@ -134,116 +128,50 @@ def _provider_for_model(model: str) -> tuple[Optional[str], Optional[dict]]:
     return None, None
 
 
-def _cloud_generate(prompt: str, model: str, provider: str, info: dict) -> str:
-    """Call a cloud LLM's chat completions API."""
+# Cloud models aren't thermally constrained — allow much longer answers than
+# the local 512-token cap (LLM_NUM_PRED below).
+CLOUD_NUM_PRED = int(os.environ.get("CLOUD_NUM_PRED", "2048"))
+
+
+def _cloud_headers(provider: str, info: dict) -> dict:
     if provider == "anthropic":
-        resp = requests.post(
-            info["url"],
-            headers={
-                "x-api-key": info["key"],
+        return {"x-api-key": info["key"],
                 "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": LLM_NUM_PRED,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=120,
-        )
-        resp.raise_for_status()
-        return resp.json()["content"][0]["text"]
+                "content-type": "application/json"}
+    # openai, gemini, groq, together — all OpenAI-compatible
+    return {"Authorization": f"Bearer {info['key']}",
+            "Content-Type": "application/json"}
 
-    if provider == "gemini":
-        resp = requests.post(
-            info["url"],
-            headers={
-                "Authorization": f"Bearer {info['key']}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": LLM_NUM_PRED,
-            },
-            timeout=120,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
 
-    # OpenAI-compatible (openai, groq, together)
+def _cloud_generate(prompt: str, model: str, provider: str, info: dict,
+                    max_tokens: Optional[int] = None) -> str:
+    """Call a cloud LLM's chat completions API (Anthropic or OpenAI-compatible)."""
     resp = requests.post(
         info["url"],
-        headers={
-            "Authorization": f"Bearer {info['key']}",
-            "Content-Type": "application/json",
-        },
+        headers=_cloud_headers(provider, info),
         json={
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": LLM_NUM_PRED,
+            "max_tokens": max_tokens or CLOUD_NUM_PRED,
         },
         timeout=120,
     )
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    data = resp.json()
+    if provider == "anthropic":
+        return data["content"][0]["text"]
+    return data["choices"][0]["message"]["content"]
 
 
 def _cloud_stream(prompt: str, model: str, provider: str, info: dict):
     """Stream tokens from a cloud LLM. Yields text chunks."""
-    if provider == "anthropic":
-        resp = requests.post(
-            info["url"],
-            headers={
-                "x-api-key": info["key"],
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": LLM_NUM_PRED,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": True,
-            },
-            timeout=300,
-            stream=True,
-        )
-        resp.raise_for_status()
-        for line in resp.iter_lines():
-            if not line:
-                continue
-            text = line.decode()
-            if not text.startswith("data: "):
-                continue
-            data = text[6:]
-            if data.strip() == "[DONE]":
-                break
-            try:
-                obj = json.loads(data)
-                if obj.get("type") == "content_block_delta":
-                    tok = obj.get("delta", {}).get("text", "")
-                    if tok:
-                        yield tok
-            except json.JSONDecodeError:
-                continue
-        return
-
-    # OpenAI-compatible streaming (openai, groq, together, gemini)
-    url = info["url"]
-    headers = {
-        "Authorization": f"Bearer {info['key']}",
-        "Content-Type": "application/json",
-    }
-    if provider == "gemini":
-        headers["Authorization"] = f"Bearer {info['key']}"
-
     resp = requests.post(
-        url,
-        headers=headers,
+        info["url"],
+        headers=_cloud_headers(provider, info),
         json={
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": LLM_NUM_PRED,
+            "max_tokens": CLOUD_NUM_PRED,
             "stream": True,
         },
         timeout=300,
@@ -261,28 +189,20 @@ def _cloud_stream(prompt: str, model: str, provider: str, info: dict):
             break
         try:
             obj = json.loads(data)
-            tok = obj.get("choices", [{}])[0].get("delta", {}).get("content", "")
-            if tok:
-                yield tok
         except json.JSONDecodeError:
             continue
+        if provider == "anthropic":
+            if obj.get("type") == "content_block_delta":
+                tok = obj.get("delta", {}).get("text", "")
+            else:
+                tok = ""
+        else:
+            tok = obj.get("choices", [{}])[0].get("delta", {}).get("content", "") or ""
+        if tok:
+            yield tok
 
-# VITS — use "vctk_base" for multi-speaker (109 voices), "ljs_base" for single
-VITS_DATASET    = "vctk_base"
-VITS_CONFIG     = os.path.join(VITS_ROOT, f"datasets/{VITS_DATASET}/config.yaml")
-VITS_VOCAB      = os.path.join(VITS_ROOT, f"datasets/{VITS_DATASET}/vocab.txt")
-VITS_CHECKPOINT = os.path.join(VITS_ROOT, f"datasets/{VITS_DATASET}/logs/G_1000.pth")
-
-# VCTK speakers 0-20 are clear, well-trained English voices
-_VCTK_SPEAKERS = list(range(21))
-
-def _vits_device():
-    import torch
-    return (
-        "mps"  if torch.backends.mps.is_available() else
-        "cuda" if torch.cuda.is_available()          else
-        "cpu"
-    )
+# Voice pool size — speaker_id is an index into tts.py's curated `say` voices.
+_N_VOICES = 21
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -291,7 +211,7 @@ def _vits_device():
 
 def paper_profile(filename: str, total_chars: int, n_pages: int) -> dict:
     """
-    Derive chunk_size, overlap, Pomodoro work duration, and VITS speaker ID
+    Derive chunk_size, overlap, Pomodoro work duration, and voice speaker ID
     from a paper's size metrics.
 
     Returns
@@ -301,7 +221,7 @@ def paper_profile(filename: str, total_chars: int, n_pages: int) -> dict:
       overlap       int   overlap between consecutive chunks
       work_minutes  int   Pomodoro work-session length in minutes
       work_seconds  int   same in seconds (used to set the timer)
-      speaker_id    int   VCTK speaker index (0-108)
+      speaker_id    int   voice index (0-20), rendered by tts.py
       total_chars   int
       n_pages       int
     """
@@ -322,9 +242,9 @@ def paper_profile(filename: str, total_chars: int, n_pages: int) -> dict:
     # ── Pomodoro: 2 min/page, clamped to [15, 50] min ────────────────────────
     work_minutes = max(15, min(50, n_pages * 2))
 
-    # ── VITS speaker: deterministic hash of filename → consistent per paper ───
+    # ── voice: deterministic hash of filename → consistent per paper ──────────
     h = int(hashlib.md5(filename.encode()).hexdigest()[:8], 16)
-    speaker_id = _VCTK_SPEAKERS[h % len(_VCTK_SPEAKERS)]
+    speaker_id = h % _N_VOICES
 
     return {
         "chunk_size":   chunk_size,
@@ -345,7 +265,7 @@ class AgentState(TypedDict):
     # timer
     action:        str
     timer:         dict
-    announce:      Optional[str]   # text → VITS TTS
+    announce:      Optional[str]   # timer-transition text (spoken by tts.py)
     audio_path:    Optional[str]
 
     # RAG
@@ -357,7 +277,7 @@ class AgentState(TypedDict):
     results:       list            # raw search hits
 
     # paper profile (set by ingest_node, carried through the run)
-    speaker_id:    Optional[int]   # VITS speaker for this paper
+    speaker_id:    Optional[int]   # voice index for this paper (tts.py)
     paper_profile: Optional[dict]  # full profile dict
 
 
@@ -367,8 +287,7 @@ class AgentState(TypedDict):
 
 # ── Lightweight tuning for 16 GB Macs ─────────────────────────────────────────
 EMBED_BATCH  = 24      # embed this many chunks per request (steady memory)
-LLM_NUM_CTX  = 4096    # cap the context window → smaller KV cache
-LLM_NUM_PRED = 512     # cap answer length (post-mortems are short)
+LLM_NUM_PRED = 512     # cap local answer length (cloud uses CLOUD_NUM_PRED)
 LLM_KEEPALIVE = "5m"   # unload the model after idle to free RAM
 
 
@@ -397,33 +316,36 @@ def get_model() -> str:
     return LLM_MODEL
 
 
-def list_models() -> list[str]:
-    """Names of all available models — local Ollama + cloud providers."""
-    models = []
-    for name, info in _PROVIDERS.items():
-        models.extend(info["models"])
+def list_models() -> dict:
+    """All available models, grouped: {"local": [...], "cloud": [...]}.
+    Re-detects providers so a freshly edited .env only needs a page refresh."""
+    load_dotenv(os.path.join(_HERE, ".env"), override=True)
+    _detect_providers()
+    cloud = [m for info in _PROVIDERS.values() for m in info["models"]]
+    local = []
     try:
         r = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=10)
         r.raise_for_status()
-        models.extend(m["name"] for m in r.json().get("models", []))
+        local = [m["name"] for m in r.json().get("models", [])]
     except requests.RequestException:
         pass
-    return models
+    return {"local": local, "cloud": cloud}
 
 
-def _generate(prompt: str) -> str:
-    """Generate a completion. Routes to cloud if the active model belongs to a
-    configured provider, otherwise falls back to local Ollama."""
+def generate(prompt: str, max_tokens: Optional[int] = None) -> str:
+    """Generate a completion with the active model. Routes to a cloud provider
+    if the active model belongs to one, else local Ollama (with retry-on-empty,
+    since Ollama occasionally returns nothing on the call that reloads a model)."""
     provider, info = _provider_for_model(LLM_MODEL)
     if provider and info:
-        return _cloud_generate(prompt, LLM_MODEL, provider, info)
+        return _cloud_generate(prompt, LLM_MODEL, provider, info, max_tokens)
 
     payload = {
         "model": LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "keep_alive": LLM_KEEPALIVE,
-        "options": {"num_predict": LLM_NUM_PRED},
+        "options": {"num_predict": max_tokens or LLM_NUM_PRED},
     }
     text = ""
     for _ in range(2):
@@ -433,6 +355,9 @@ def _generate(prompt: str) -> str:
         if text.strip():
             return text
     return text
+
+
+_generate = generate  # internal alias used by the RAG chain
 
 
 class _OllamaEmbeddings:
@@ -478,86 +403,6 @@ def pomodoro_node(state: AgentState) -> AgentState:
         snapshot = {**_timer, "tasks": list(_timer["tasks"])}
 
     return {**state, "timer": snapshot, "announce": announce}
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Node: vits
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_net_g      = None
-_vits_hps   = None
-_vits_vocab = None
-_model_lock = threading.Lock()
-
-
-def _load_vits() -> None:
-    """Lazy: only imports torch/VITS when VITS audio is actually requested."""
-    global _net_g, _vits_hps, _vits_vocab
-    from model.models import SynthesizerTrn
-    from utils.hparams import get_hparams_from_file
-    from utils.task import load_checkpoint, load_vocab
-
-    _vits_hps   = get_hparams_from_file(VITS_CONFIG)
-    _vits_vocab = load_vocab(VITS_VOCAB)
-    filter_len  = (
-        _vits_hps.data.n_mels if _vits_hps.data.use_mel
-        else _vits_hps.data.n_fft // 2 + 1
-    )
-    seg_size   = _vits_hps.train.segment_size // _vits_hps.data.hop_length
-    n_speakers = getattr(_vits_hps.data, "n_speakers", 0)
-    net = SynthesizerTrn(
-        len(_vits_vocab), filter_len, seg_size,
-        n_speakers=n_speakers, **_vits_hps.model,
-    ).to(_vits_device())
-    net.eval()
-    load_checkpoint(VITS_CHECKPOINT, net, None)
-    _net_g = net
-
-
-def _get_vits() -> tuple:
-    if _net_g is None:
-        with _model_lock:
-            if _net_g is None:
-                _load_vits()
-    return _net_g, _vits_hps, _vits_vocab
-
-
-def synthesize(text: str, out_path: str,
-               speaker_id: Optional[int] = None,
-               noise_scale: float = 0.667,
-               noise_scale_w: float = 0.8,
-               length_scale: float = 1.0) -> str:
-    """text → .wav at out_path via VITS2. speaker_id selects the VCTK voice."""
-    import torch
-    from text import tokenizer
-    net, hps, vocab = _get_vits()
-    device = _vits_device()
-    tokens = tokenizer(
-        text, vocab, hps.data.text_cleaners,
-        language=hps.data.language, cleaned_text=False,
-    )
-    x     = torch.LongTensor(tokens).unsqueeze(0).to(device)
-    x_len = torch.LongTensor([len(tokens)]).to(device)
-    sid   = torch.LongTensor([speaker_id]).to(device) if speaker_id is not None else None
-    with torch.no_grad():
-        out = net.infer(x, x_len, sid=sid,
-                        noise_scale=noise_scale,
-                        noise_scale_w=noise_scale_w,
-                        length_scale=length_scale)
-    import soundfile as sf
-    sf.write(out_path, out[0][0, 0].cpu().float().numpy(), hps.data.sample_rate)
-    return out_path
-
-
-def vits_node(state: AgentState) -> AgentState:
-    text = state.get("announce")
-    if not text:
-        return state
-    # Use the speaker assigned to this paper; fall back to None (ljs single-speaker)
-    speaker_id = state.get("speaker_id")
-    out_path   = f"/tmp/pomo_{int(time.time())}.wav"
-    synthesize(text, out_path, speaker_id=speaker_id)
-    return {**state, "audio_path": out_path}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -696,6 +541,15 @@ def ingest_node(state: AgentState) -> AgentState:
                 ids.append(f"{fname}::{len(ids)}")
 
         if texts:
+            # Drop this paper's previous chunks first: stable ids upsert the
+            # overlap, but a re-upload with FEWER chunks would otherwise leave
+            # stale tail chunks polluting retrieval.
+            old_ids = [k for k in getattr(store, "_docs", {}) if k.startswith(f"{fname}::")]
+            if old_ids:
+                try:
+                    store.delete(old_ids)
+                except Exception:
+                    pass
             store.add_texts(texts, metadatas=metas, ids=ids)
             ingested.append(fname)
 
@@ -709,7 +563,7 @@ def ingest_node(state: AgentState) -> AgentState:
     store.dump(TURBOVEC_DIR)
 
     # Audio is generated on demand via macOS `say` (/api/speak), so ingest does
-    # NOT route through VITS — keeps ingest fast and torch-free.
+    # Audio is generated on demand via macOS `say` (tts.py, /api/speak).
     with state_lock:
         snapshot = {**_timer, "tasks": list(_timer["tasks"])}
 
@@ -876,15 +730,6 @@ def _dispatch(state: AgentState) -> str:
     return END
 
 
-def _after_pomodoro(state: AgentState) -> str:
-    return "vits" if state.get("announce") else END
-
-
-def _after_ingest(state: AgentState) -> str:
-    # Always speak the profile announcement after ingesting
-    return "vits" if state.get("announce") else END
-
-
 def _after_retrieve(state: AgentState) -> str:
     return "llm" if state.get("action") == "query" else END
 
@@ -897,7 +742,6 @@ def build_graph():
     g = StateGraph(AgentState)
 
     g.add_node("pomodoro", pomodoro_node)
-    g.add_node("vits",     vits_node)
     g.add_node("ingest",   ingest_node)
     g.add_node("retrieve", retrieve_node)
     g.add_node("llm",      llm_node)
@@ -908,12 +752,11 @@ def build_graph():
         "retrieve": "retrieve",
         END:        END,
     })
-    g.add_conditional_edges("pomodoro", _after_pomodoro, {"vits": "vits", END: END})
-    g.add_conditional_edges("ingest",   _after_ingest,   {"vits": "vits", END: END})
-    g.add_conditional_edges("retrieve", _after_retrieve,  {"llm":  "llm",  END: END})
+    g.add_conditional_edges("retrieve", _after_retrieve, {"llm": "llm", END: END})
 
-    g.add_edge("vits", END)
-    g.add_edge("llm",  END)
+    g.add_edge("pomodoro", END)
+    g.add_edge("ingest",   END)
+    g.add_edge("llm",      END)
 
     return g.compile()
 
@@ -936,17 +779,28 @@ def _base(**kw) -> AgentState:
 
 
 def quick_profile(path: str) -> dict:
-    """FAST path: extract text, derive the profile, and set the Pomodoro timer —
-    NO embedding. Lets the UI show the adjusted timer instantly on upload while
-    the heavy embedding runs in the background."""
-    ext     = Path(path).suffix.lower()
-    extract = _EXTRACTORS.get(ext)
-    if extract is None:
-        raise ValueError(f"Unsupported file type: {ext}")
-    raw         = extract(path)
-    total_chars = sum(len(t) for t, _ in raw)
-    n_pages     = len(raw) if ext == ".pdf" else max(1, total_chars // 2_500)
-    profile     = paper_profile(Path(path).name, total_chars, n_pages)
+    """FAST path: estimate the profile and set the Pomodoro timer — NO embedding
+    and, for PDFs, NO full text extraction (a 300-page PDF would block the
+    upload response for seconds). Samples a few pages and extrapolates."""
+    ext = Path(path).suffix.lower()
+    if ext == ".pdf":
+        import pypdf
+        reader  = pypdf.PdfReader(path)
+        n_pages = len(reader.pages)
+        # Sample up to 6 pages spread through the document → chars/page estimate
+        idx     = sorted({0, n_pages // 4, n_pages // 2, (3 * n_pages) // 4,
+                          n_pages - 1, min(1, n_pages - 1)})
+        sampled = [len(reader.pages[i].extract_text() or "") for i in idx]
+        per_pg  = (sum(sampled) / len(sampled)) if sampled else 2_500
+        total_chars = int(per_pg * n_pages)
+    else:
+        extract = _EXTRACTORS.get(ext)
+        if extract is None:
+            raise ValueError(f"Unsupported file type: {ext}")
+        raw         = extract(path)
+        total_chars = sum(len(t) for t, _ in raw)
+        n_pages     = max(1, total_chars // 2_500)
+    profile = paper_profile(Path(path).name, total_chars, n_pages)
     with state_lock:
         _timer["settings"]["work_duration"] = profile["work_seconds"]
         _timer["elapsed"] = 0
@@ -1001,7 +855,7 @@ if __name__ == "__main__":
         print(f"Total docs:       {r['results'][0]['total_docs']}")
         print(f"Chunk size:       {p['chunk_size']} chars (overlap {p['overlap']})")
         print(f"Pomodoro session: {p['work_minutes']} min")
-        print(f"VITS speaker:     #{p['speaker_id']}")
+        print(f"Voice:            #{p['speaker_id']}")
 
     elif cmd == "query":
         print(query(" ".join(args)))

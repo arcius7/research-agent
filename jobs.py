@@ -21,6 +21,7 @@ import uuid
 from typing import Any, Callable, Optional
 
 _MAX_WORKERS = max(1, int(os.environ.get("WORKERS", "1")))
+_MAX_KEPT    = 200          # finished jobs retained for status polling
 
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
@@ -34,6 +35,18 @@ def _update(job_id: str, **kw) -> None:
             _jobs[job_id].update(**kw)
 
 
+def _evict_locked() -> None:
+    """Drop the oldest finished jobs beyond the cap. Call under _jobs_lock."""
+    if len(_jobs) <= _MAX_KEPT:
+        return
+    done = sorted(
+        (j for j in _jobs.values() if j["status"] in ("done", "error")),
+        key=lambda j: j["created"],
+    )
+    for j in done[: len(_jobs) - _MAX_KEPT]:
+        _jobs.pop(j["id"], None)
+
+
 def submit(kind: str, fn: Callable, *args, **kwargs) -> str:
     """Queue a job. Returns its id immediately."""
     job_id = uuid.uuid4().hex[:12]
@@ -42,8 +55,8 @@ def submit(kind: str, fn: Callable, *args, **kwargs) -> str:
             "id": job_id, "kind": kind, "status": "queued",
             "result": None, "error": None,
             "created": time.time(), "started": None, "finished": None,
-            "queue_position": _q.qsize() + 1,
         }
+        _evict_locked()
     _q.put((job_id, fn, args, kwargs))
     return job_id
 
@@ -51,7 +64,19 @@ def submit(kind: str, fn: Callable, *args, **kwargs) -> str:
 def status(job_id: str) -> Optional[dict]:
     with _jobs_lock:
         j = _jobs.get(job_id)
-        return dict(j) if j else None
+        if not j:
+            return None
+        out = dict(j)
+        if j["status"] == "queued":
+            # live position: queued jobs submitted before this one, plus any
+            # currently running job
+            ahead = sum(
+                1 for o in _jobs.values()
+                if o["status"] == "queued" and o["created"] < j["created"]
+            )
+            running = sum(1 for o in _jobs.values() if o["status"] == "running")
+            out["queue_position"] = ahead + running + 1
+        return out
 
 
 def _worker() -> None:

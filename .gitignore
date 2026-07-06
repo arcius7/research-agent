@@ -52,3 +52,6 @@ vits2/datasets/*/filelists/*.cleaned
 
 # PageIndex run logs / tree outputs
 logs/
+
+# Reference-extraction cache (rebuilt from papers)
+.refs_cache/

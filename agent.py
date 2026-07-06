@@ -77,6 +77,11 @@ EMBED_MODEL  = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 
 TURBOVEC_DIR = os.path.join(_HERE, ".turbovec_store")
 
+# Single-paper mode (default ON): the agent holds exactly ONE paper at a time.
+# Uploading a paper wipes the store so questions answer against only that paper —
+# no bleed from previously uploaded papers. Set SINGLE_PAPER=0 for a shared store.
+SINGLE_PAPER = os.environ.get("SINGLE_PAPER", "1") not in ("0", "false", "False")
+
 # ── Cloud LLM provider detection ─────────────────────────────────────────────
 # When an API key is set in .env, we route LLM calls through that provider
 # instead of local Ollama. Embeddings always stay on Ollama (local, free).
@@ -506,9 +511,23 @@ def _get_store() -> TurboQuantVectorStore:
                 )
     return _store
 
+
+def reset_store() -> None:
+    """Wipe the vector store (in-memory + on-disk). Single-paper mode calls this
+    before ingesting so the store only ever holds the newest paper."""
+    global _store
+    import shutil
+    with _store_lock:
+        _store = TurboQuantVectorStore(embedding=_OllamaEmbeddings(), bit_width=4)
+        shutil.rmtree(TURBOVEC_DIR, ignore_errors=True)
+
 # ── ingest node ───────────────────────────────────────────────────────────────
 
 def ingest_node(state: AgentState) -> AgentState:
+    # Single-paper mode: clear everything first so this upload becomes the ONLY
+    # paper in memory — questions can't bleed in from earlier papers.
+    if SINGLE_PAPER:
+        reset_store()
     store    = _get_store()
     files    = state.get("files", [])
     ingested = []
@@ -562,7 +581,6 @@ def ingest_node(state: AgentState) -> AgentState:
 
     store.dump(TURBOVEC_DIR)
 
-    # Audio is generated on demand via macOS `say` (/api/speak), so ingest does
     # Audio is generated on demand via macOS `say` (tts.py, /api/speak).
     with state_lock:
         snapshot = {**_timer, "tasks": list(_timer["tasks"])}
@@ -584,10 +602,11 @@ def ingest_node(state: AgentState) -> AgentState:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _retrieve(query: str, paper: Optional[str] = None, k: int = 4):
-    """Top-k chunks. When `paper` is set, restrict to that paper's chunks so
-    answers don't bleed in from other ingested papers."""
+    """Top-k chunks. In single-paper mode the store holds one paper, so we skip
+    the source filter entirely (a stale current_paper can't starve retrieval).
+    In multi-paper mode, `paper` restricts to that paper's chunks."""
     store   = _get_store()
-    flt     = {"source": paper} if paper else None
+    flt     = None if SINGLE_PAPER else ({"source": paper} if paper else None)
     return store.similarity_search_with_score(query, k=k, filter=flt)
 
 
@@ -664,9 +683,9 @@ def _format_docs(docs) -> str:
 
 
 def build_rag_chain(paper: Optional[str] = None):
-    """LangChain Expression Language chain: retrieve (filtered by paper) →
-    prompt → local Ollama. Invoke with the question string."""
-    flt       = {"source": paper} if paper else None
+    """LangChain Expression Language chain: retrieve → prompt → LLM. In
+    single-paper mode the filter is dropped (store holds one paper)."""
+    flt       = None if SINGLE_PAPER else ({"source": paper} if paper else None)
     retriever = _get_store().as_retriever(search_kwargs={"k": 4, "filter": flt})
     return (
         {"context": retriever | RunnableLambda(_format_docs),

@@ -91,6 +91,27 @@ class TestCoerceJsonList(unittest.TestCase):
         self.assertEqual(_coerce_json_list("no json here"), [])
 
 
+class TestSinglePaperConfig(unittest.TestCase):
+    def test_single_paper_default_on(self):
+        # Default behaviour is single-paper so questions don't bleed across papers
+        self.assertTrue(agent.SINGLE_PAPER)
+
+    def test_retrieve_drops_filter_in_single_paper(self):
+        # In single-paper mode a stale `paper` arg must NOT filter retrieval.
+        captured = {}
+        real = agent._get_store
+        class FakeStore:
+            def similarity_search_with_score(self, q, k, filter):
+                captured["filter"] = filter
+                return []
+        agent._get_store = lambda: FakeStore()
+        try:
+            agent._retrieve("q", paper="whatever.pdf")
+            self.assertIsNone(captured["filter"])
+        finally:
+            agent._get_store = real
+
+
 class TestTimerState(unittest.TestCase):
     def test_shared_singleton_with_agent(self):
         # The regression this repo shipped with: agent must mutate the SAME dict

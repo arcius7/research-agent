@@ -119,6 +119,7 @@
 <header>
   <div class="brand">🔬 Research<span>Agent</span></div>
   <div class="paper-name" id="paperName">no paper loaded</div>
+  <button id="btnNew" onclick="newPaper()" style="display:none">＋ New paper</button>
   <div class="timer">
     <div class="mode-pill" id="modePill">work</div>
     <div class="clock" id="clock">25:00</div>
@@ -261,14 +262,25 @@ function setPaper(name){
   $('viewer').src = '/api/pdf?name='+encodeURIComponent(name);
   $('viewer').style.display='block';
   dz.style.display='none';
+  $('btnNew').style.display='';
   $('btnRefs').disabled = false;
+}
+
+// Single-paper mode: uploading a new paper REPLACES the current one in memory.
+// This button just reopens the dropzone so switching papers is obvious.
+function newPaper(){
+  $('viewer').style.display='none';
+  $('viewer').src='';
+  dz.style.display='';
+  dz.querySelector('h2').textContent = 'Drop a paper here';
+  $('answer').innerHTML=''; $('refs').innerHTML=''; $('audioBar').innerHTML='';
 }
 
 // ── Profile card + adaptive timer (rendered instantly on upload) ─────────────
 function renderProfile(p, st, err){
   p = p || {};
   const status =
-    st==='ready'  ? '<span class="badge ok">embedded ✓ — Ask is ready</span>' :
+    st==='ready'  ? '<span class="badge ok">embedded ✓ — ask questions about this paper</span>' :
     st==='failed' ? `<span class="badge no">embedding failed</span><span class="meta">${esc(err||'')}</span>` :
                     '<span class="meta"><span class="spinner"></span>embedding in background…</span>';
   $('profile').innerHTML = `<div class="profile">

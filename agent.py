@@ -341,10 +341,13 @@ def list_models() -> dict:
     return {"local": local, "cloud": cloud}
 
 
-def generate(prompt: str, max_tokens: Optional[int] = None) -> str:
+def generate(prompt: str, max_tokens: Optional[int] = None,
+             json_only: bool = False) -> str:
     """Generate a completion with the active model. Routes to a cloud provider
     if the active model belongs to one, else local Ollama (with retry-on-empty,
-    since Ollama occasionally returns nothing on the call that reloads a model)."""
+    since Ollama occasionally returns nothing on the call that reloads a model).
+    `json_only` constrains Ollama to emit valid JSON (small local models drift
+    into prose otherwise); cloud models follow the prompt without it."""
     provider, info = _provider_for_model(LLM_MODEL)
     _t0 = time.time()
     if provider and info:
@@ -353,7 +356,7 @@ def generate(prompt: str, max_tokens: Optional[int] = None) -> str:
         log.info("generate done (%s) %d chars in %.1fs", provider, len(out), time.time() - _t0)
         return out
 
-    log.info("generate via OLLAMA %s", LLM_MODEL)
+    log.info("generate via OLLAMA %s%s", LLM_MODEL, " (json mode)" if json_only else "")
     payload = {
         "model": LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -361,6 +364,8 @@ def generate(prompt: str, max_tokens: Optional[int] = None) -> str:
         "keep_alive": LLM_KEEPALIVE,
         "options": {"num_predict": max_tokens or LLM_NUM_PRED},
     }
+    if json_only:
+        payload["format"] = "json"
     text = ""
     for attempt in range(2):
         resp = requests.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=300)

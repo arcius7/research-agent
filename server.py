@@ -456,6 +456,9 @@ def main():
     import jobs
     jobs.start_workers()                 # serialized background worker(s)
 
+    import preflight
+    preflight.run_async()                # verify Ollama/SearXNG/memory, autostart SearXNG
+
     port   = int(os.environ.get("PORT", 8765))
     host   = os.environ.get("HOST", "127.0.0.1")   # localhost only by default —
     server = ThreadingHTTPServer((host, port), Handler)  # set HOST=0.0.0.0 to expose on LAN

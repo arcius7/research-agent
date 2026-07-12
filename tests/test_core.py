@@ -90,6 +90,17 @@ class TestCoerceJsonList(unittest.TestCase):
     def test_garbage(self):
         self.assertEqual(_coerce_json_list("no json here"), [])
 
+    def test_truncated_array_salvages_complete_objects(self):
+        # Token cap cuts output mid-array: no closing ] — salvage what parsed.
+        txt = '[{"title": "First", "year": "2020"}, {"title": "Second", "ye'
+        out = _coerce_json_list(txt)
+        self.assertEqual(out, [{"title": "First", "year": "2020"}])
+
+    def test_json_object_per_line(self):
+        txt = '{"title": "A"}\n{"title": "B"}'
+        out = _coerce_json_list(txt)
+        self.assertEqual([o["title"] for o in out], ["A", "B"])
+
 
 class TestSinglePaperConfig(unittest.TestCase):
     def test_single_paper_default_on(self):

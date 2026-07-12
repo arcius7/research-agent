@@ -80,11 +80,16 @@ def extract_references(pdf_path: str, force: bool = False) -> list[dict]:
         return []
 
     # agent.generate: /api/chat + retry-on-empty locally, cloud routing when a
-    # paid model is active. Reference lists are long — allow up to 2048 tokens.
+    # paid model is active. json_only keeps small local models from drifting
+    # into prose; reference lists are long — allow up to 3072 tokens.
     import agent
-    text = agent.generate(_EXTRACT_PROMPT.format(refs=raw), max_tokens=2048)
+    text = agent.generate(_EXTRACT_PROMPT.format(refs=raw),
+                          max_tokens=3072, json_only=True)
 
     refs = _coerce_json_list(text)
+    if not refs and text.strip():
+        log.warning("references: could not parse LLM output (%d chars). Head: %r",
+                    len(text), text[:200])
     # Normalise + drop entries with no title
     out = []
     for r in refs:
@@ -107,7 +112,10 @@ def extract_references(pdf_path: str, force: bool = False) -> list[dict]:
 
 
 def _coerce_json_list(text: str) -> list[dict]:
-    """Best-effort parse of an LLM response into a list of dicts."""
+    """Best-effort parse of an LLM response into a list of dicts.
+    Handles: a clean array, an array wrapped in an object, an array buried in
+    prose, and — critically — output TRUNCATED mid-array by the token cap
+    (salvages every complete {...} object individually)."""
     text = text.strip()
     try:
         data = json.loads(text)
@@ -119,13 +127,27 @@ def _coerce_json_list(text: str) -> list[dict]:
             return [data]
         return data if isinstance(data, list) else []
     except json.JSONDecodeError:
-        m = re.search(r"\[.*\]", text, re.S)
-        if m:
-            try:
-                return json.loads(m.group(0))
-            except json.JSONDecodeError:
-                return []
-        return []
+        pass
+
+    m = re.search(r"\[.*\]", text, re.S)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    # Salvage: token cap can cut the array off mid-object, so no closing `]`
+    # ever appears. Reference entries are flat objects — pull out each complete
+    # {...} and keep the ones that parse.
+    out = []
+    for frag in re.findall(r"\{[^{}]*\}", text):
+        try:
+            obj = json.loads(frag)
+            if isinstance(obj, dict):
+                out.append(obj)
+        except json.JSONDecodeError:
+            continue
+    return out
 
 
 # ── 2. search + download ──────────────────────────────────────────────────────
